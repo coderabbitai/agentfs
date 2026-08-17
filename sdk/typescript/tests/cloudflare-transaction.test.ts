@@ -175,20 +175,46 @@ describe('Cloudflare caller-owned transactions', () => {
 
     const initialized = storage.sql.exec(`
       CREATE TABLE adapter_test(value INTEGER);
-      INSERT INTO adapter_test(value) VALUES (1);
-    `);
+      INSERT INTO adapter_test(value) VALUES (?) RETURNING value;
+    `, 1);
     expect(initialized.rowsWritten).toBe(1);
+    expect(initialized.one()).toEqual({ value: 1 });
     const inserted = storage.sql.exec(
       'INSERT INTO adapter_test(value) VALUES (?)',
       2,
     );
     expect(inserted.rowsWritten).toBe(1);
+    const cteInserted = storage.sql.exec<{ value: number }>(
+      `WITH source(value) AS (SELECT ?)
+       INSERT INTO adapter_test(value) SELECT value FROM source
+       RETURNING value`,
+      3,
+    );
+    expect(cteInserted.rowsWritten).toBe(1);
+    expect(cteInserted.one()).toEqual({ value: 3 });
 
     const cursor = storage.sql.exec<{ value: number }>(
       'SELECT value FROM adapter_test ORDER BY value',
     );
+    expect(cursor.columnNames).toEqual(['value']);
     expect(cursor.next()).toEqual({ done: false, value: { value: 1 } });
-    expect([...cursor]).toEqual([{ value: 2 }]);
+    expect(cursor.rowsRead).toBe(1);
+    expect(cursor.toArray()).toEqual([{ value: 2 }, { value: 3 }]);
+    expect(cursor.rowsRead).toBe(3);
+
+    const rawCursor = storage.sql.exec<{ value: number }>(
+      'SELECT value FROM adapter_test ORDER BY value',
+    );
+    expect(rawCursor.next()).toEqual({ done: false, value: { value: 1 } });
+    expect([...rawCursor.raw()]).toEqual([[2], [3]]);
+    expect(rawCursor.rowsRead).toBe(3);
+
+    expect(() => storage.transactionSync(async () => {
+      storage.sql.exec('INSERT INTO adapter_test(value) VALUES (4)');
+    })).toThrow('transaction callback must be synchronous');
+    expect(storage.sql.exec<{ count: number }>(
+      'SELECT COUNT(*) AS count FROM adapter_test',
+    ).one()).toEqual({ count: 3 });
   });
 
   it('supports rename and removal without nested transactions', async () => {

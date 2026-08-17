@@ -19,31 +19,37 @@ interface TestCursor<T> extends Iterable<T> {
 }
 
 class ArrayCursor<T> implements TestCursor<T> {
-  readonly columnNames: string[] = [];
   private position = 0;
 
   constructor(
     private readonly rows: T[],
+    readonly columnNames: string[],
     readonly rowsWritten = 0,
   ) {}
 
   get rowsRead(): number {
-    return this.rows.length;
+    return this.position;
   }
 
   toArray(): T[] {
-    return [...this.rows];
+    const remaining = this.rows.slice(this.position);
+    this.position = this.rows.length;
+    return remaining;
   }
 
   one(): T {
-    if (this.rows.length !== 1) {
-      throw new Error(`expected one row, received ${this.rows.length}`);
+    const remaining = this.rows.length - this.position;
+    if (remaining !== 1) {
+      throw new Error(`expected one row, received ${remaining}`);
     }
-    return this.rows[0];
+    return this.rows[this.position++];
   }
 
   *raw(): IterableIterator<unknown[]> {
-    for (const row of this.rows) yield Object.values(Object(row));
+    while (this.position < this.rows.length) {
+      const row = this.rows[this.position++];
+      yield this.columnNames.map(column => Reflect.get(Object(row), column));
+    }
   }
 
   next(): TestCursorNextResult<T> {
@@ -77,6 +83,7 @@ function isSqlArrayBufferView(value: unknown): value is NodeJS.ArrayBufferView {
 
 interface QueryResult<T> {
   readonly rows: T[];
+  readonly columnNames: string[];
   readonly rowsWritten: number;
 }
 
@@ -91,21 +98,45 @@ function queryRows(
   bindings: SQLInputValue[],
 ): QueryResult<unknown> {
   const statement = database.prepare(query);
-  const writesRows = /^\s*(INSERT|UPDATE|DELETE)\b/i.test(query);
-  const returnsRows = /\bRETURNING\b/i.test(query);
-  if (writesRows && !returnsRows) {
-    const result = statement.run(...bindings);
-    return { rows: [], rowsWritten: Number(result.changes) };
-  }
-  return { rows: statement.all(...bindings), rowsWritten: 0 };
+  const rows = statement.all(...bindings);
+  return {
+    rows,
+    columnNames: statement.columns().map(column => column.name),
+    rowsWritten: isWriteStatement(query) ? readChanges(database) : 0,
+  };
 }
 
-function hasMultipleSqlStatements(query: string): boolean {
-  let statements = 0;
+function readChanges(database: DatabaseSync): number {
+  const row = database.prepare('SELECT changes() AS count').get();
+  const count = row === undefined ? undefined : Reflect.get(row, 'count');
+  if (typeof count !== 'number' && typeof count !== 'bigint') {
+    throw new TypeError('SQLite changes() did not return a numeric count');
+  }
+  return Number(count);
+}
+
+interface SqlToken {
+  readonly depth: number;
+  readonly word: string;
+}
+
+interface SqlScanResult {
+  readonly statements: string[];
+  readonly tokens: SqlToken[];
+}
+
+function scanSql(query: string): SqlScanResult {
+  const statements: string[] = [];
+  const tokens: SqlToken[] = [];
+  let statementStart = 0;
   let hasToken = false;
   let quote: "'" | '"' | '`' | ']' | undefined;
   let lineComment = false;
   let blockComment = false;
+  let depth = 0;
+  let triggerBody = false;
+  let triggerEnd = false;
+  let statementWords: string[] = [];
 
   for (let index = 0; index < query.length; index++) {
     const character = query[index];
@@ -145,14 +176,78 @@ function hasMultipleSqlStatements(query: string): boolean {
       continue;
     }
     if (character === ';') {
-      if (hasToken) statements++;
+      if (triggerBody && !triggerEnd) {
+        hasToken = true;
+        continue;
+      }
+      if (hasToken) statements.push(query.slice(statementStart, index));
+      statementStart = index + 1;
       hasToken = false;
+      triggerBody = false;
+      triggerEnd = false;
+      statementWords = [];
+      continue;
+    }
+    if (character === '(') {
+      depth++;
+      hasToken = true;
+      continue;
+    }
+    if (character === ')') {
+      depth = Math.max(0, depth - 1);
+      hasToken = true;
+      continue;
+    }
+    if (/[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+      while (end < query.length && /[A-Za-z0-9_]/.test(query[end])) end++;
+      const word = query.slice(index, end).toUpperCase();
+      tokens.push({ depth, word });
+      if (depth === 0) {
+        statementWords.push(word);
+        if (
+          word === 'BEGIN' &&
+          statementWords[0] === 'CREATE' &&
+          statementWords.includes('TRIGGER')
+        ) {
+          triggerBody = true;
+        } else if (triggerBody) {
+          triggerEnd = word === 'END';
+        }
+      }
+      hasToken = true;
+      index = end - 1;
       continue;
     }
     if (!/\s/.test(character)) hasToken = true;
   }
-  if (hasToken) statements++;
-  return statements > 1;
+  if (hasToken) statements.push(query.slice(statementStart));
+  return { statements, tokens };
+}
+
+function isWriteStatement(query: string): boolean {
+  const topLevelWords = scanSql(query).tokens
+    .filter(token => token.depth === 0)
+    .map(token => token.word);
+  const operation = topLevelWords[0] === 'WITH'
+    ? topLevelWords.find(word => word === 'INSERT' || word === 'UPDATE' || word === 'DELETE')
+    : topLevelWords[0];
+  return operation === 'INSERT' || operation === 'UPDATE' || operation === 'DELETE';
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+    return false;
+  }
+  return typeof Reflect.get(Object(value), 'then') === 'function';
+}
+
+function runSynchronous<T>(callback: () => T): T {
+  const result = callback();
+  if (isPromiseLike(result)) {
+    throw new TypeError('Cloudflare storage transaction callback must be synchronous');
+  }
+  return result;
 }
 
 export function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
@@ -162,17 +257,25 @@ export function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
         query: string,
         ...bindings: unknown[]
       ): TestCursor<T> {
-        if (bindings.length === 0 && hasMultipleSqlStatements(query)) {
-          database.exec(query);
-          const changes = queryRows<{ readonly count: number }>(
-            database,
-            'SELECT changes() AS count',
-            [],
-          ).rows[0]?.count ?? 0;
-          return new ArrayCursor<T>([], changes);
+        const statements = scanSql(query).statements;
+        const prefix = statements.slice(0, -1);
+        for (const statement of prefix) {
+          queryRows(database, statement, []);
         }
-        const result = queryRows<T>(database, query, bindings.map(toSqlInputValue));
-        return new ArrayCursor<T>(result.rows, result.rowsWritten);
+        const finalStatement = statements.at(-1);
+        if (finalStatement === undefined) {
+          return new ArrayCursor<T>([], [], 0);
+        }
+        const result = queryRows<T>(
+          database,
+          finalStatement,
+          bindings.map(toSqlInputValue),
+        );
+        return new ArrayCursor<T>(
+          result.rows,
+          result.columnNames,
+          result.rowsWritten,
+        );
       },
       get databaseSize() {
         return 0;
@@ -181,7 +284,7 @@ export function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
     transactionSync<T>(callback: () => T): T {
       database.exec('BEGIN IMMEDIATE');
       try {
-        const result = callback();
+        const result = runSynchronous(callback);
         database.exec('COMMIT');
         return result;
       } catch (error) {
