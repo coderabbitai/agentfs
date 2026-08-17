@@ -60,8 +60,7 @@ class AgentFSFile {
             const sizeRow = this.storage.sql.exec('SELECT size FROM fs_inode WHERE ino = ?', this.ino).toArray()[0];
             const currentSize = sizeRow?.size ?? 0;
             if (offset > currentSize) {
-                const zeros = Buffer.alloc(offset - currentSize);
-                this.writeDataAtOffset(currentSize, zeros);
+                this.writeZerosAtOffset(currentSize, offset - currentSize);
             }
             this.writeDataAtOffset(offset, data);
             const newSize = Math.max(currentSize, offset + data.length);
@@ -96,6 +95,12 @@ class AgentFSFile {
          ON CONFLICT(ino, chunk_index) DO UPDATE SET data = excluded.data`, this.ino, chunkIdx, chunkData);
         }
     }
+    writeZerosAtOffset(offset, length) {
+        const zeroChunk = Buffer.alloc(this.chunkSize);
+        for (let written = 0; written < length; written += this.chunkSize) {
+            this.writeDataAtOffset(offset + written, zeroChunk.subarray(0, Math.min(this.chunkSize, length - written)));
+        }
+    }
     async truncate(newSize) {
         this.storage.transactionSync(() => this.truncateSync(newSize));
     }
@@ -124,7 +129,7 @@ class AgentFSFile {
             }
         }
         else if (newSize > currentSize) {
-            this.writeDataAtOffset(currentSize, Buffer.alloc(newSize - currentSize));
+            this.writeZerosAtOffset(currentSize, newSize - currentSize);
         }
         const now = Math.floor(Date.now() / 1000);
         this.storage.sql.exec('UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?', newSize, now, this.ino);

@@ -108,6 +108,20 @@ describe('Cloudflare caller-owned transactions', () => {
     expect((await filesystem.readFile('/file.bin')).byteLength).toBe(12289);
   });
 
+  it('zero-fills sparse writes without allocating the complete gap at once', async () => {
+    const { filesystem } = createFixture();
+    await filesystem.writeFile('/sparse.bin', Buffer.from('abc'));
+    const handle = await filesystem.open('/sparse.bin');
+
+    await handle.pwrite(20_000, Buffer.from('tail'));
+
+    const content = await filesystem.readFile('/sparse.bin');
+    expect(content.byteLength).toBe(20_004);
+    expect(content.subarray(0, 3).toString()).toBe('abc');
+    expect(content.subarray(3, 20_000)).toEqual(Buffer.alloc(19_997));
+    expect(content.subarray(20_000).toString()).toBe('tail');
+  });
+
   it('supports rename and removal without nested transactions', async () => {
     const { filesystem } = createFixture();
 

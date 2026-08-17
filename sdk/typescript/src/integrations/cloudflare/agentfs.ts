@@ -151,8 +151,7 @@ class AgentFSFile implements FileHandle {
       const currentSize = sizeRow?.size ?? 0;
 
       if (offset > currentSize) {
-        const zeros = Buffer.alloc(offset - currentSize);
-        this.writeDataAtOffset(currentSize, zeros);
+        this.writeZerosAtOffset(currentSize, offset - currentSize);
       }
 
       this.writeDataAtOffset(offset, data);
@@ -205,6 +204,16 @@ class AgentFSFile implements FileHandle {
     }
   }
 
+  private writeZerosAtOffset(offset: number, length: number): void {
+    const zeroChunk = Buffer.alloc(this.chunkSize);
+    for (let written = 0; written < length; written += this.chunkSize) {
+      this.writeDataAtOffset(
+        offset + written,
+        zeroChunk.subarray(0, Math.min(this.chunkSize, length - written))
+      );
+    }
+  }
+
   async truncate(newSize: number): Promise<void> {
     this.storage.transactionSync(() => this.truncateSync(newSize));
   }
@@ -249,7 +258,7 @@ class AgentFSFile implements FileHandle {
         }
       }
     } else if (newSize > currentSize) {
-      this.writeDataAtOffset(currentSize, Buffer.alloc(newSize - currentSize));
+      this.writeZerosAtOffset(currentSize, newSize - currentSize);
     }
 
     const now = Math.floor(Date.now() / 1000);
