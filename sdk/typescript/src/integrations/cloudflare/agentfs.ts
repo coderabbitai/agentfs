@@ -21,6 +21,15 @@ import {
   type FileHandle,
   type FileSystem,
 } from '../../filesystem/interface.js';
+import { CloudflareKvStore, type CloudflareKvTransaction } from './kvstore.js';
+import {
+  CloudflareOverlayMetadata,
+  type CloudflareOverlayTransaction,
+} from './overlay.js';
+import {
+  CloudflareToolCalls,
+  type CloudflareToolCallsTransaction,
+} from './toolcalls.js';
 
 const DEFAULT_CHUNK_SIZE = 4096;
 const AGENTFS_SCHEMA_VERSION = '0.4';
@@ -60,6 +69,9 @@ export interface CloudflareStorage {
  * transaction. Methods on this object never open a nested transaction.
  */
 export interface CloudflareAgentFSTransaction {
+  readonly kv: CloudflareKvTransaction;
+  readonly tools: CloudflareToolCallsTransaction;
+  readonly overlay: CloudflareOverlayTransaction;
   readFile(path: string): Buffer;
   writeFile(
     path: string,
@@ -328,9 +340,16 @@ export class AgentFS implements FileSystem {
   private storage: CloudflareStorage;
   private rootIno: number = 1;
   private chunkSize: number = DEFAULT_CHUNK_SIZE;
+  readonly kv: CloudflareKvStore;
+  readonly tools: CloudflareToolCalls;
+  readonly overlay: CloudflareOverlayMetadata;
 
   private constructor(storage: CloudflareStorage) {
     this.storage = storage;
+    this.initialize();
+    this.kv = new CloudflareKvStore(storage);
+    this.tools = new CloudflareToolCalls(storage);
+    this.overlay = new CloudflareOverlayMetadata(storage);
   }
 
   /**
@@ -339,9 +358,7 @@ export class AgentFS implements FileSystem {
    * @param storage - The ctx.storage from a Durable Object
    */
   static create(storage: CloudflareStorage): AgentFS {
-    const fs = new AgentFS(storage);
-    fs.initialize();
-    return fs;
+    return new AgentFS(storage);
   }
 
   getChunkSize(): number {
@@ -357,6 +374,9 @@ export class AgentFS implements FileSystem {
    */
   transactionSync<T>(callback: (transaction: CloudflareAgentFSTransaction) => T): T {
     const transaction: CloudflareAgentFSTransaction = {
+      kv: this.kv.transactionView(),
+      tools: this.tools.transactionView(),
+      overlay: this.overlay.transactionView(),
       readFile: path => this.readFileSync(path),
       writeFile: (path, content, options) => this.writeFileSync(path, content, options),
       unlink: path => this.unlinkSync(path),

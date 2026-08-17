@@ -7,6 +7,9 @@
  * @see https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
  */
 import { type Stats, type DirEntry, type FilesystemStats, type FileHandle, type FileSystem } from '../../filesystem/interface.js';
+import { CloudflareKvStore, type CloudflareKvTransaction } from './kvstore.js';
+import { CloudflareOverlayMetadata, type CloudflareOverlayTransaction } from './overlay.js';
+import { CloudflareToolCalls, type CloudflareToolCallsTransaction } from './toolcalls.js';
 /**
  * Cloudflare Durable Objects SqlStorage cursor interface
  */
@@ -42,6 +45,9 @@ export interface CloudflareStorage {
  * transaction. Methods on this object never open a nested transaction.
  */
 export interface CloudflareAgentFSTransaction {
+    readonly kv: CloudflareKvTransaction;
+    readonly tools: CloudflareToolCallsTransaction;
+    readonly overlay: CloudflareOverlayTransaction;
     readFile(path: string): Buffer;
     writeFile(path: string, content: string | Buffer, options?: BufferEncoding | {
         encoding?: BufferEncoding;
@@ -83,6 +89,9 @@ export declare class AgentFS implements FileSystem {
     private storage;
     private rootIno;
     private chunkSize;
+    readonly kv: CloudflareKvStore;
+    readonly tools: CloudflareToolCalls;
+    readonly overlay: CloudflareOverlayMetadata;
     private constructor();
     /**
      * Create a AgentFS from a Durable Object storage context.

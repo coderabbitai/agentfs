@@ -27,3 +27,6 @@
  * @see https://developers.cloudflare.com/durable-objects/
  */
 export { AgentFS, } from "./agentfs.js";
+export { CloudflareKvStore, } from "./kvstore.js";
+export { CloudflareOverlayMetadata, } from "./overlay.js";
+export { CloudflareToolCalls, } from "./toolcalls.js";

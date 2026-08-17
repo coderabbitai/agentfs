@@ -136,6 +136,10 @@ describe('Cloudflare caller-owned transactions', () => {
     expect(database.prepare(
       "SELECT value FROM fs_config WHERE key = 'schema_version'"
     ).get()).toEqual({ value: 'future' });
+    expect(database.prepare(
+      `SELECT COUNT(*) AS count FROM sqlite_master
+       WHERE type = 'table' AND name IN ('kv_store', 'tool_calls', 'fs_whiteout', 'fs_origin')`
+    ).get()).toEqual({ count: 0 });
   });
 
   it('supports rename and removal without nested transactions', async () => {

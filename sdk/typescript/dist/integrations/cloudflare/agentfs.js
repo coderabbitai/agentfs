@@ -7,6 +7,9 @@
  * @see https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
  */
 import { S_IFMT, S_IFDIR, S_IFLNK, DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, createStats, } from '../../filesystem/interface.js';
+import { CloudflareKvStore } from './kvstore.js';
+import { CloudflareOverlayMetadata, } from './overlay.js';
+import { CloudflareToolCalls, } from './toolcalls.js';
 const DEFAULT_CHUNK_SIZE = 4096;
 const AGENTFS_SCHEMA_VERSION = '0.4';
 function createFsError(opts) {
@@ -177,8 +180,15 @@ export class AgentFS {
     storage;
     rootIno = 1;
     chunkSize = DEFAULT_CHUNK_SIZE;
+    kv;
+    tools;
+    overlay;
     constructor(storage) {
         this.storage = storage;
+        this.initialize();
+        this.kv = new CloudflareKvStore(storage);
+        this.tools = new CloudflareToolCalls(storage);
+        this.overlay = new CloudflareOverlayMetadata(storage);
     }
     /**
      * Create a AgentFS from a Durable Object storage context.
@@ -186,9 +196,7 @@ export class AgentFS {
      * @param storage - The ctx.storage from a Durable Object
      */
     static create(storage) {
-        const fs = new AgentFS(storage);
-        fs.initialize();
-        return fs;
+        return new AgentFS(storage);
     }
     getChunkSize() {
         return this.chunkSize;
@@ -202,6 +210,9 @@ export class AgentFS {
      */
     transactionSync(callback) {
         const transaction = {
+            kv: this.kv.transactionView(),
+            tools: this.tools.transactionView(),
+            overlay: this.overlay.transactionView(),
             readFile: path => this.readFileSync(path),
             writeFile: (path, content, options) => this.writeFileSync(path, content, options),
             unlink: path => this.unlinkSync(path),
