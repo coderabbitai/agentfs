@@ -27,7 +27,11 @@
  * @see https://developers.cloudflare.com/durable-objects/
  */
 
-export { AgentFS, type CloudflareStorage } from "./agentfs.js";
+export {
+  AgentFS,
+  type CloudflareAgentFSTransaction,
+  type CloudflareStorage,
+} from "./agentfs.js";
 
 export type {
   FileSystem,

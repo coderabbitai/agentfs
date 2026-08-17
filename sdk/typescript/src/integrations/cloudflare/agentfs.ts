@@ -55,6 +55,22 @@ export interface CloudflareStorage {
 }
 
 /**
+ * Synchronous mutation surface used inside one caller-owned SQLite
+ * transaction. Methods on this object never open a nested transaction.
+ */
+export interface CloudflareAgentFSTransaction {
+  writeFile(
+    path: string,
+    content: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): void;
+  unlink(path: string): void;
+  rm(path: string, options?: { force?: boolean; recursive?: boolean }): void;
+  rename(oldPath: string, newPath: string): void;
+  truncate(path: string, newSize: number): void;
+}
+
+/**
  * Error codes for filesystem operations
  */
 type FsErrorCode = 'ENOENT' | 'EEXIST' | 'EISDIR' | 'ENOTDIR' | 'ENOTEMPTY' | 'EPERM' | 'EINVAL';
@@ -189,49 +205,57 @@ class AgentFSFile implements FileHandle {
   }
 
   async truncate(newSize: number): Promise<void> {
-    this.storage.transactionSync(() => {
-      const sizeRow = this.storage.sql.exec<{ size: number }>(
-        'SELECT size FROM fs_inode WHERE ino = ?',
-        this.ino
-      ).toArray()[0];
-      const currentSize = sizeRow?.size ?? 0;
+    this.storage.transactionSync(() => this.truncateSync(newSize));
+  }
 
-      if (newSize === 0) {
-        this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', this.ino);
-      } else if (newSize < currentSize) {
-        const lastChunkIdx = Math.floor((newSize - 1) / this.chunkSize);
+  truncateSync(newSize: number): void {
+    if (!Number.isSafeInteger(newSize) || newSize < 0) {
+      throw new RangeError('new size must be a non-negative safe integer');
+    }
 
-        this.storage.sql.exec(
-          'DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?',
+    const sizeRow = this.storage.sql.exec<{ size: number }>(
+      'SELECT size FROM fs_inode WHERE ino = ?',
+      this.ino
+    ).toArray()[0];
+    const currentSize = sizeRow?.size ?? 0;
+
+    if (newSize === 0) {
+      this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', this.ino);
+    } else if (newSize < currentSize) {
+      const lastChunkIdx = Math.floor((newSize - 1) / this.chunkSize);
+
+      this.storage.sql.exec(
+        'DELETE FROM fs_data WHERE ino = ? AND chunk_index > ?',
+        this.ino, lastChunkIdx
+      );
+
+      const offsetInChunk = newSize % this.chunkSize;
+      if (offsetInChunk > 0) {
+        const rows = this.storage.sql.exec<{ data: ArrayBuffer }>(
+          'SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?',
           this.ino, lastChunkIdx
-        );
+        ).toArray();
 
-        const offsetInChunk = newSize % this.chunkSize;
-        if (offsetInChunk > 0) {
-          const rows = this.storage.sql.exec<{ data: ArrayBuffer }>(
-            'SELECT data FROM fs_data WHERE ino = ? AND chunk_index = ?',
-            this.ino, lastChunkIdx
-          ).toArray();
-
-          if (rows.length > 0) {
-            const existingData = Buffer.from(rows[0].data);
-            if (existingData.length > offsetInChunk) {
-              const truncatedChunk = existingData.subarray(0, offsetInChunk);
-              this.storage.sql.exec(
-                'UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?',
-                truncatedChunk, this.ino, lastChunkIdx
-              );
-            }
+        if (rows.length > 0) {
+          const existingData = Buffer.from(rows[0].data);
+          if (existingData.length > offsetInChunk) {
+            const truncatedChunk = existingData.subarray(0, offsetInChunk);
+            this.storage.sql.exec(
+              'UPDATE fs_data SET data = ? WHERE ino = ? AND chunk_index = ?',
+              truncatedChunk, this.ino, lastChunkIdx
+            );
           }
         }
       }
+    } else if (newSize > currentSize) {
+      this.writeDataAtOffset(currentSize, Buffer.alloc(newSize - currentSize));
+    }
 
-      const now = Math.floor(Date.now() / 1000);
-      this.storage.sql.exec(
-        'UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?',
-        newSize, now, this.ino
-      );
-    });
+    const now = Math.floor(Date.now() / 1000);
+    this.storage.sql.exec(
+      'UPDATE fs_inode SET size = ?, mtime = ? WHERE ino = ?',
+      newSize, now, this.ino
+    );
   }
 
   async fsync(): Promise<void> {
@@ -311,6 +335,24 @@ export class AgentFS implements FileSystem {
 
   getChunkSize(): number {
     return this.chunkSize;
+  }
+
+  /**
+   * Runs AgentFS mutations in one caller-owned storage transaction.
+   *
+   * The transaction object is synchronous by construction so a mutation
+   * failure is thrown before the storage callback returns and can roll back
+   * application tables changed in the same callback.
+   */
+  transactionSync<T>(callback: (transaction: CloudflareAgentFSTransaction) => T): T {
+    const transaction: CloudflareAgentFSTransaction = {
+      writeFile: (path, content, options) => this.writeFileSync(path, content, options),
+      unlink: path => this.unlinkSync(path),
+      rm: (path, options) => this.rmSync(path, options),
+      rename: (oldPath, newPath) => this.renameSync(oldPath, newPath),
+      truncate: (path, newSize) => this.truncateSync(path, newSize),
+    };
+    return this.storage.transactionSync(() => callback(transaction));
   }
 
   private initialize(): void {
@@ -564,6 +606,14 @@ export class AgentFS implements FileSystem {
     content: string | Buffer,
     options?: BufferEncoding | { encoding?: BufferEncoding }
   ): Promise<void> {
+    this.storage.transactionSync(() => this.writeFileSync(path, content, options));
+  }
+
+  private writeFileSync(
+    path: string,
+    content: string | Buffer,
+    options?: BufferEncoding | { encoding?: BufferEncoding }
+  ): void {
     const encoding = typeof options === 'string'
       ? options
       : options?.encoding;
@@ -572,39 +622,37 @@ export class AgentFS implements FileSystem {
       ? Buffer.from(content, encoding ?? 'utf8')
       : content;
 
-    this.storage.transactionSync(() => {
-      this.ensureParentDirs(path);
+    this.ensureParentDirs(path);
 
-      const ino = this.resolvePath(path);
-      const normalizedPath = this.normalizePath(path);
+    const ino = this.resolvePath(path);
+    const normalizedPath = this.normalizePath(path);
 
-      if (ino !== null) {
-        const mode = this.getInodeMode(ino);
-        if (mode !== null && (mode & S_IFMT) === S_IFDIR) {
-          throw createFsError({
-            code: 'EISDIR',
-            syscall: 'open',
-            path: normalizedPath,
-            message: 'illegal operation on a directory',
-          });
-        }
-        this.updateFileContent(ino, buffer);
-      } else {
-        const parent = this.resolveParent(path);
-        if (!parent) {
-          throw createFsError({
-            code: 'ENOENT',
-            syscall: 'open',
-            path: normalizedPath,
-            message: 'no such file or directory',
-          });
-        }
-
-        const fileIno = this.createInode(DEFAULT_FILE_MODE);
-        this.createDentry(parent.parentIno, parent.name, fileIno);
-        this.updateFileContent(fileIno, buffer);
+    if (ino !== null) {
+      const mode = this.getInodeMode(ino);
+      if (mode !== null && (mode & S_IFMT) === S_IFDIR) {
+        throw createFsError({
+          code: 'EISDIR',
+          syscall: 'open',
+          path: normalizedPath,
+          message: 'illegal operation on a directory',
+        });
       }
-    });
+      this.updateFileContent(ino, buffer);
+    } else {
+      const parent = this.resolveParent(path);
+      if (!parent) {
+        throw createFsError({
+          code: 'ENOENT',
+          syscall: 'open',
+          path: normalizedPath,
+          message: 'no such file or directory',
+        });
+      }
+
+      const fileIno = this.createInode(DEFAULT_FILE_MODE);
+      this.createDentry(parent.parentIno, parent.name, fileIno);
+      this.updateFileContent(fileIno, buffer);
+    }
   }
 
   private updateFileContent(ino: number, buffer: Buffer): void {
@@ -880,6 +928,10 @@ export class AgentFS implements FileSystem {
   }
 
   async unlink(path: string): Promise<void> {
+    this.storage.transactionSync(() => this.unlinkSync(path));
+  }
+
+  private unlinkSync(path: string): void {
     const normalizedPath = this.normalizePath(path);
 
     if (normalizedPath === '/') {
@@ -905,29 +957,35 @@ export class AgentFS implements FileSystem {
 
     const parent = this.resolveParent(normalizedPath)!;
 
-    this.storage.transactionSync(() => {
-      this.storage.sql.exec(
-        'DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?',
-        parent.parentIno, parent.name
-      );
+    this.storage.sql.exec(
+      'DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?',
+      parent.parentIno, parent.name
+    );
 
-      this.storage.sql.exec(
-        'UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?',
-        ino
-      );
+    this.storage.sql.exec(
+      'UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?',
+      ino
+    );
 
-      const linkCount = this.getLinkCount(ino);
-      if (linkCount === 0) {
-        this.storage.sql.exec('DELETE FROM fs_inode WHERE ino = ?', ino);
-        this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', ino);
-      }
-    });
+    const linkCount = this.getLinkCount(ino);
+    if (linkCount === 0) {
+      this.storage.sql.exec('DELETE FROM fs_inode WHERE ino = ?', ino);
+      this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', ino);
+      this.storage.sql.exec('DELETE FROM fs_symlink WHERE ino = ?', ino);
+    }
   }
 
   async rm(
     path: string,
     options?: { force?: boolean; recursive?: boolean }
   ): Promise<void> {
+    this.storage.transactionSync(() => this.rmSync(path, options));
+  }
+
+  private rmSync(
+    path: string,
+    options?: { force?: boolean; recursive?: boolean }
+  ): void {
     const normalizedPath = this.normalizePath(path);
     const force = options?.force ?? false;
     const recursive = options?.recursive ?? false;
@@ -987,10 +1045,8 @@ export class AgentFS implements FileSystem {
         });
       }
 
-      this.storage.transactionSync(() => {
-        this.rmDirContentsRecursive(ino);
-        this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino);
-      });
+      this.rmDirContentsRecursive(ino);
+      this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino);
       return;
     }
 
@@ -1038,6 +1094,10 @@ export class AgentFS implements FileSystem {
   }
 
   async rename(oldPath: string, newPath: string): Promise<void> {
+    this.storage.transactionSync(() => this.renameSync(oldPath, newPath));
+  }
+
+  private renameSync(oldPath: string, newPath: string): void {
     const oldNormalized = this.normalizePath(oldPath);
     const newNormalized = this.normalizePath(newPath);
 
@@ -1072,82 +1132,95 @@ export class AgentFS implements FileSystem {
       });
     }
 
-    this.storage.transactionSync(() => {
-      const { ino: oldIno } = this.resolvePathOrThrow(oldNormalized, 'rename');
-      const oldMode = this.getInodeMode(oldIno);
-      if (oldMode === null) {
-        throw createFsError({
-          code: 'ENOENT',
-          syscall: 'rename',
-          path: oldNormalized,
-          message: 'no such file or directory',
-        });
-      }
-      const oldIsDir = (oldMode & S_IFMT) === S_IFDIR;
+    const { ino: oldIno } = this.resolvePathOrThrow(oldNormalized, 'rename');
+    const oldMode = this.getInodeMode(oldIno);
+    if (oldMode === null) {
+      throw createFsError({
+        code: 'ENOENT',
+        syscall: 'rename',
+        path: oldNormalized,
+        message: 'no such file or directory',
+      });
+    }
+    const oldIsDir = (oldMode & S_IFMT) === S_IFDIR;
 
-      if (oldIsDir && newNormalized.startsWith(oldNormalized + '/')) {
-        throw createFsError({
-          code: 'EINVAL',
-          syscall: 'rename',
-          path: newNormalized,
-          message: 'invalid argument',
-        });
-      }
+    if (oldIsDir && newNormalized.startsWith(oldNormalized + '/')) {
+      throw createFsError({
+        code: 'EINVAL',
+        syscall: 'rename',
+        path: newNormalized,
+        message: 'invalid argument',
+      });
+    }
 
-      const newIno = this.resolvePath(newNormalized);
-      if (newIno !== null) {
-        const newMode = this.getInodeMode(newIno);
-        if (newMode !== null) {
-          const newIsDir = (newMode & S_IFMT) === S_IFDIR;
+    const newIno = this.resolvePath(newNormalized);
+    if (newIno !== null) {
+      const newMode = this.getInodeMode(newIno);
+      if (newMode !== null) {
+        const newIsDir = (newMode & S_IFMT) === S_IFDIR;
 
-          if (newIsDir && !oldIsDir) {
-            throw createFsError({
-              code: 'EISDIR',
-              syscall: 'rename',
-              path: newNormalized,
-              message: 'illegal operation on a directory',
-            });
-          }
-          if (!newIsDir && oldIsDir) {
-            throw createFsError({
-              code: 'ENOTDIR',
-              syscall: 'rename',
-              path: newNormalized,
-              message: 'not a directory',
-            });
-          }
-
-          if (newIsDir) {
-            const children = this.storage.sql.exec<{ one: number }>(
-              'SELECT 1 as one FROM fs_dentry WHERE parent_ino = ? LIMIT 1',
-              newIno
-            ).toArray();
-            if (children.length > 0) {
-              throw createFsError({
-                code: 'ENOTEMPTY',
-                syscall: 'rename',
-                path: newNormalized,
-                message: 'directory not empty',
-              });
-            }
-          }
-
-          this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno);
+        if (newIsDir && !oldIsDir) {
+          throw createFsError({
+            code: 'EISDIR',
+            syscall: 'rename',
+            path: newNormalized,
+            message: 'illegal operation on a directory',
+          });
         }
-      }
+        if (!newIsDir && oldIsDir) {
+          throw createFsError({
+            code: 'ENOTDIR',
+            syscall: 'rename',
+            path: newNormalized,
+            message: 'not a directory',
+          });
+        }
 
-      this.storage.sql.exec(
-        'UPDATE fs_dentry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?',
-        newParent.parentIno, newParent.name, oldParent.parentIno, oldParent.name
-      );
+        if (newIsDir) {
+          const children = this.storage.sql.exec<{ one: number }>(
+            'SELECT 1 as one FROM fs_dentry WHERE parent_ino = ? LIMIT 1',
+            newIno
+          ).toArray();
+          if (children.length > 0) {
+            throw createFsError({
+              code: 'ENOTEMPTY',
+              syscall: 'rename',
+              path: newNormalized,
+              message: 'directory not empty',
+            });
+          }
+        }
 
-      const now = Math.floor(Date.now() / 1000);
-      this.storage.sql.exec('UPDATE fs_inode SET ctime = ? WHERE ino = ?', now, oldIno);
-      this.storage.sql.exec('UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?', now, now, oldParent.parentIno);
-      if (newParent.parentIno !== oldParent.parentIno) {
-        this.storage.sql.exec('UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?', now, now, newParent.parentIno);
+        this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno);
       }
-    });
+    }
+
+    this.storage.sql.exec(
+      'UPDATE fs_dentry SET parent_ino = ?, name = ? WHERE parent_ino = ? AND name = ?',
+      newParent.parentIno, newParent.name, oldParent.parentIno, oldParent.name
+    );
+
+    const now = Math.floor(Date.now() / 1000);
+    this.storage.sql.exec('UPDATE fs_inode SET ctime = ? WHERE ino = ?', now, oldIno);
+    this.storage.sql.exec('UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?', now, now, oldParent.parentIno);
+    if (newParent.parentIno !== oldParent.parentIno) {
+      this.storage.sql.exec('UPDATE fs_inode SET mtime = ?, ctime = ? WHERE ino = ?', now, now, newParent.parentIno);
+    }
+  }
+
+  private truncateSync(path: string, newSize: number): void {
+    const normalizedPath = this.normalizePath(path);
+    const { ino } = this.resolvePathOrThrow(normalizedPath, 'truncate');
+    const mode = this.getInodeMode(ino);
+    if (mode !== null && (mode & S_IFMT) === S_IFDIR) {
+      throw createFsError({
+        code: 'EISDIR',
+        syscall: 'truncate',
+        path: normalizedPath,
+        message: 'illegal operation on a directory',
+      });
+    }
+    new AgentFSFile(this.storage, ino, this.chunkSize).truncateSync(newSize);
   }
 
   async copyFile(src: string, dest: string): Promise<void> {
