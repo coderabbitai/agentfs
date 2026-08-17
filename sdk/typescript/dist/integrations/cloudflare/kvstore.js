@@ -1,4 +1,5 @@
 import { parseStoredJson, serializeJson } from './json.js';
+import { assertTransactionViewCapability, } from './transaction.js';
 function escapeLike(value) {
     return value.replace(/[\\%_]/g, character => `\\${character}`);
 }
@@ -21,7 +22,8 @@ export class CloudflareKvStore {
         ON kv_store(created_at);
     `);
     }
-    transactionView(assertOpen = () => undefined) {
+    transactionView(capability, assertOpen) {
+        assertTransactionViewCapability(capability);
         return {
             set: (key, value) => {
                 assertOpen();

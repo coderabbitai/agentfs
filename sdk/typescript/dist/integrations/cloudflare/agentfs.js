@@ -10,6 +10,7 @@ import { S_IFMT, S_IFDIR, S_IFLNK, DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, createSt
 import { CloudflareKvStore } from './kvstore.js';
 import { CloudflareOverlayMetadata, } from './overlay.js';
 import { CloudflareToolCalls, } from './toolcalls.js';
+import { cloudflareTransactionViewCapability } from './transaction.js';
 const DEFAULT_CHUNK_SIZE = 4096;
 const DEFAULT_MAX_ZERO_FILL_BYTES = 1024 * 1024;
 const AGENTFS_SCHEMA_VERSION = '0.4';
@@ -235,9 +236,9 @@ export class AgentFS {
                 throw new Error('AgentFS transaction is already closed');
         };
         const transaction = {
-            kv: this.kv.transactionView(assertOpen),
-            tools: this.tools.transactionView(assertOpen),
-            overlay: this.overlay.transactionView(assertOpen),
+            kv: this.kv.transactionView(cloudflareTransactionViewCapability, assertOpen),
+            tools: this.tools.transactionView(cloudflareTransactionViewCapability, assertOpen),
+            overlay: this.overlay.transactionView(cloudflareTransactionViewCapability, assertOpen),
             readFile: path => {
                 assertOpen();
                 return this.readFileSync(path);

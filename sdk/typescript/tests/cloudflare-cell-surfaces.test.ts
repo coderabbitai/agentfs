@@ -90,6 +90,16 @@ describe('Cloudflare single-cell AgentFS surfaces', () => {
     expect(agent.overlay.getOrigin(8)).toBeUndefined();
   });
 
+  it('rejects transaction-view construction without the internal capability', () => {
+    const { agent } = createFixture();
+
+    for (const surface of [agent.kv, agent.tools, agent.overlay]) {
+      const transactionView = Reflect.get(surface, 'transactionView');
+      expect(() => Reflect.apply(transactionView, surface, [Symbol('external'), () => undefined]))
+        .toThrow('invalid AgentFS transaction view capability');
+    }
+  });
+
   it('lists KV prefixes literally and rejects values JSON cannot persist', () => {
     const { agent } = createFixture();
     agent.kv.set('scope:100%:one', { value: 1 });

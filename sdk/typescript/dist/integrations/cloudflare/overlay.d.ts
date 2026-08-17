@@ -1,4 +1,5 @@
 import type { CloudflareStorage } from './agentfs.js';
+import { type CloudflareTransactionViewCapability } from './transaction.js';
 export interface CloudflareOverlayTransaction {
     createWhiteout(path: string, createdAt?: number): void;
     removeWhiteout(path: string): void;
@@ -10,7 +11,7 @@ export declare class CloudflareOverlayMetadata implements CloudflareOverlayTrans
     private readonly storage;
     constructor(storage: CloudflareStorage);
     private initialize;
-    transactionView(assertOpen?: () => void): CloudflareOverlayTransaction;
+    transactionView(capability: CloudflareTransactionViewCapability, assertOpen: () => void): CloudflareOverlayTransaction;
     createWhiteout(path: string, createdAt?: number): void;
     private createWhiteoutSync;
     removeWhiteout(path: string): void;

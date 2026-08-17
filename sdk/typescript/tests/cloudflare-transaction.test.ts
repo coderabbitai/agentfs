@@ -163,6 +163,34 @@ describe('Cloudflare caller-owned transactions', () => {
     ).get()).toEqual({ count: 0 });
   });
 
+  it('models Cloudflare cursor writes, statement boundaries, and shared iteration state', () => {
+    const database = new DatabaseSync(':memory:');
+    databases.push(database);
+    const storage = cloudflareStorage(database);
+
+    expect(storage.sql.exec<{ value: string }>("SELECT ';' AS value;").one())
+      .toEqual({ value: ';' });
+    expect(storage.sql.exec<{ value: number }>('SELECT 7 AS value;').one())
+      .toEqual({ value: 7 });
+
+    const initialized = storage.sql.exec(`
+      CREATE TABLE adapter_test(value INTEGER);
+      INSERT INTO adapter_test(value) VALUES (1);
+    `);
+    expect(initialized.rowsWritten).toBe(1);
+    const inserted = storage.sql.exec(
+      'INSERT INTO adapter_test(value) VALUES (?)',
+      2,
+    );
+    expect(inserted.rowsWritten).toBe(1);
+
+    const cursor = storage.sql.exec<{ value: number }>(
+      'SELECT value FROM adapter_test ORDER BY value',
+    );
+    expect(cursor.next()).toEqual({ done: false, value: { value: 1 } });
+    expect([...cursor]).toEqual([{ value: 2 }]);
+  });
+
   it('supports rename and removal without nested transactions', async () => {
     const { filesystem } = createFixture();
 

@@ -1,3 +1,4 @@
+import { assertTransactionViewCapability, } from './transaction.js';
 const MAX_QUERY_BINDINGS = 100;
 function validatePath(path) {
     if (!path.startsWith('/') ||
@@ -46,7 +47,8 @@ export class CloudflareOverlayMetadata {
       );
     `);
     }
-    transactionView(assertOpen = () => undefined) {
+    transactionView(capability, assertOpen) {
+        assertTransactionViewCapability(capability);
         return {
             createWhiteout: (path, createdAt) => {
                 assertOpen();

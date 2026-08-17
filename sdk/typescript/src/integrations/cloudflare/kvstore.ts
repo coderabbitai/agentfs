@@ -1,5 +1,9 @@
 import type { CloudflareStorage } from './agentfs.js';
 import { parseStoredJson, serializeJson } from './json.js';
+import {
+  assertTransactionViewCapability,
+  type CloudflareTransactionViewCapability,
+} from './transaction.js';
 
 export interface CloudflareKvEntry<T = unknown> {
   key: string;
@@ -39,7 +43,11 @@ export class CloudflareKvStore implements CloudflareKvTransaction {
     `);
   }
 
-  transactionView(assertOpen: () => void = () => undefined): CloudflareKvTransaction {
+  transactionView(
+    capability: CloudflareTransactionViewCapability,
+    assertOpen: () => void,
+  ): CloudflareKvTransaction {
+    assertTransactionViewCapability(capability);
     return {
       set: (key, value) => {
         assertOpen();

@@ -1,4 +1,8 @@
 import type { CloudflareStorage } from './agentfs.js';
+import {
+  assertTransactionViewCapability,
+  type CloudflareTransactionViewCapability,
+} from './transaction.js';
 
 const MAX_QUERY_BINDINGS = 100;
 
@@ -66,7 +70,11 @@ export class CloudflareOverlayMetadata implements CloudflareOverlayTransaction {
     `);
   }
 
-  transactionView(assertOpen: () => void = () => undefined): CloudflareOverlayTransaction {
+  transactionView(
+    capability: CloudflareTransactionViewCapability,
+    assertOpen: () => void,
+  ): CloudflareOverlayTransaction {
+    assertTransactionViewCapability(capability);
     return {
       createWhiteout: (path, createdAt) => {
         assertOpen();

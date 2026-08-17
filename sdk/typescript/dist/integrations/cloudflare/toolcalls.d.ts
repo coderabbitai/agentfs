@@ -1,4 +1,5 @@
 import type { CloudflareStorage } from './agentfs.js';
+import { type CloudflareTransactionViewCapability } from './transaction.js';
 export type CloudflareToolCallOutcome = {
     readonly kind: 'success';
     readonly result: unknown;
@@ -41,7 +42,7 @@ export declare class CloudflareToolCalls implements CloudflareToolCallsTransacti
     private readonly sanitize;
     constructor(storage: CloudflareStorage, options?: CloudflareToolCallsOptions);
     private initialize;
-    transactionView(assertOpen?: () => void): CloudflareToolCallsTransaction;
+    transactionView(capability: CloudflareTransactionViewCapability, assertOpen: () => void): CloudflareToolCallsTransaction;
     record(call: CloudflareToolCallInput): number;
     private recordSync;
     get(id: number): CloudflareToolCall | undefined;

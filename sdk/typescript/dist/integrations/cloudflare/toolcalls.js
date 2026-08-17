@@ -1,4 +1,5 @@
 import { parseStoredJson, serializeJson } from './json.js';
+import { assertTransactionViewCapability, } from './transaction.js';
 function validateLimit(limit) {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 10_000) {
         throw new RangeError('tool-call query limit must be an integer from 1 through 10000');
@@ -48,7 +49,8 @@ export class CloudflareToolCalls {
         BEGIN SELECT RAISE(ABORT, 'tool_calls is insert-only'); END;
     `);
     }
-    transactionView(assertOpen = () => undefined) {
+    transactionView(capability, assertOpen) {
+        assertTransactionViewCapability(capability);
         return {
             record: call => {
                 assertOpen();

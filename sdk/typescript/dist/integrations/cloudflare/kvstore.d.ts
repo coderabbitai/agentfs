@@ -1,4 +1,5 @@
 import type { CloudflareStorage } from './agentfs.js';
+import { type CloudflareTransactionViewCapability } from './transaction.js';
 export interface CloudflareKvEntry<T = unknown> {
     key: string;
     value: T;
@@ -14,7 +15,7 @@ export declare class CloudflareKvStore implements CloudflareKvTransaction {
     private readonly storage;
     constructor(storage: CloudflareStorage);
     private initialize;
-    transactionView(assertOpen?: () => void): CloudflareKvTransaction;
+    transactionView(capability: CloudflareTransactionViewCapability, assertOpen: () => void): CloudflareKvTransaction;
     set(key: string, value: unknown): void;
     private setSync;
     get(key: string): unknown | undefined;

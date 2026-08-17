@@ -1,5 +1,9 @@
 import type { CloudflareStorage } from './agentfs.js';
 import { parseStoredJson, serializeJson } from './json.js';
+import {
+  assertTransactionViewCapability,
+  type CloudflareTransactionViewCapability,
+} from './transaction.js';
 
 export type CloudflareToolCallOutcome =
   | { readonly kind: 'success'; readonly result: unknown }
@@ -107,7 +111,11 @@ export class CloudflareToolCalls implements CloudflareToolCallsTransaction {
     `);
   }
 
-  transactionView(assertOpen: () => void = () => undefined): CloudflareToolCallsTransaction {
+  transactionView(
+    capability: CloudflareTransactionViewCapability,
+    assertOpen: () => void,
+  ): CloudflareToolCallsTransaction {
+    assertTransactionViewCapability(capability);
     return {
       record: call => {
         assertOpen();
