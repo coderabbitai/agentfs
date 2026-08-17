@@ -202,4 +202,12 @@ describe('Cloudflare single-cell AgentFS surfaces', () => {
     expect(agent.overlay.isWhiteout('/dir/child.md')).toBe(false);
     expect(() => agent.overlay.createWhiteout('/dir/../escape', 4)).toThrow('normalized absolute');
   });
+
+  it('checks deep whiteout ancestry without exceeding the SQL binding cap', () => {
+    const { agent } = createFixture();
+    agent.overlay.createWhiteout('/part-0', 1);
+    const deepPath = `/${Array.from({ length: 102 }, (_, index) => `part-${index}`).join('/')}`;
+
+    expect(agent.overlay.isWhiteout(deepPath)).toBe(true);
+  });
 });

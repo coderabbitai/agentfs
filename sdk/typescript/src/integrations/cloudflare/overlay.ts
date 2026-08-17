@@ -1,5 +1,7 @@
 import type { CloudflareStorage } from './agentfs.js';
 
+const MAX_QUERY_BINDINGS = 100;
+
 export interface CloudflareOverlayTransaction {
   createWhiteout(path: string, createdAt?: number): void;
   removeWhiteout(path: string): void;
@@ -123,12 +125,17 @@ export class CloudflareOverlayMetadata implements CloudflareOverlayTransaction {
     ) {
       ancestors.push(current);
     }
-    const placeholders = ancestors.map(() => '?').join(', ');
-    return this.storage.sql.exec<{ present: number }>(
-      `SELECT 1 AS present FROM fs_whiteout
-       WHERE path IN (${placeholders}) LIMIT 1`,
-      ...ancestors,
-    ).toArray().length > 0;
+    for (let offset = 0; offset < ancestors.length; offset += MAX_QUERY_BINDINGS) {
+      const batch = ancestors.slice(offset, offset + MAX_QUERY_BINDINGS);
+      const placeholders = batch.map(() => '?').join(', ');
+      const present = this.storage.sql.exec<{ present: number }>(
+        `SELECT 1 AS present FROM fs_whiteout
+         WHERE path IN (${placeholders}) LIMIT 1`,
+        ...batch,
+      ).toArray().length > 0;
+      if (present) return true;
+    }
+    return false;
   }
 
   listChildWhiteouts(path: string): string[] {

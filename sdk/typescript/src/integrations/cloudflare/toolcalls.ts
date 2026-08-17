@@ -2,28 +2,28 @@ import type { CloudflareStorage } from './agentfs.js';
 import { parseStoredJson, serializeJson } from './json.js';
 
 export type CloudflareToolCallOutcome =
-  | { kind: 'success'; result: unknown }
-  | { kind: 'error'; error: string };
+  | { readonly kind: 'success'; readonly result: unknown }
+  | { readonly kind: 'error'; readonly error: string };
 
 export interface CloudflareToolCallInput {
-  name: string;
-  parameters?: unknown;
-  outcome: CloudflareToolCallOutcome;
-  startedAt: number;
-  completedAt: number;
+  readonly name: string;
+  readonly parameters?: unknown;
+  readonly outcome: CloudflareToolCallOutcome;
+  readonly startedAt: number;
+  readonly completedAt: number;
 }
 
 export interface CloudflareToolCall extends CloudflareToolCallInput {
-  id: number;
-  durationMs: number;
+  readonly id: number;
+  readonly durationMs: number;
 }
 
 export interface CloudflareToolCallStats {
-  name: string;
-  totalCalls: number;
-  successful: number;
-  failed: number;
-  averageDurationMs: number;
+  readonly name: string;
+  readonly totalCalls: number;
+  readonly successful: number;
+  readonly failed: number;
+  readonly averageDurationMs: number;
 }
 
 export interface CloudflareToolCallsTransaction {
@@ -40,7 +40,7 @@ export interface CloudflareToolCallsOptions {
    * Runs immediately before parameters or successful results are serialized.
    * Applications that can receive secrets must supply their policy redactor.
    */
-  sanitize?: CloudflareToolCallSanitizer;
+  readonly sanitize?: CloudflareToolCallSanitizer;
 }
 
 interface ToolCallRow {

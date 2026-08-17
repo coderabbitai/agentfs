@@ -37,8 +37,15 @@ const DEFAULT_MAX_ZERO_FILL_BYTES = 1024 * 1024;
 const AGENTFS_SCHEMA_VERSION = '0.4';
 
 export interface CloudflareAgentFSOptions {
-  maxZeroFillBytes?: number;
-  sanitizeToolCallValue?: CloudflareToolCallSanitizer;
+  readonly maxZeroFillBytes?: number;
+  readonly sanitizeToolCallValue?: CloudflareToolCallSanitizer;
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+    return false;
+  }
+  return typeof Reflect.get(Object(value), 'then') === 'function';
 }
 
 /**
@@ -445,7 +452,13 @@ export class AgentFS implements FileSystem {
       },
     };
     try {
-      return this.storage.transactionSync(() => callback(transaction));
+      return this.storage.transactionSync(() => {
+        const result = callback(transaction);
+        if (isPromiseLike(result)) {
+          throw new TypeError('AgentFS transaction callback must be synchronous');
+        }
+        return result;
+      });
     } finally {
       open = false;
     }

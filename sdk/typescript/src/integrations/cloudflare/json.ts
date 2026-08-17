@@ -15,10 +15,12 @@ export function parseStoredJson(label: string, raw: string): unknown {
   try {
     return JSON.parse(raw);
   } catch (error) {
-    const wrapped = new TypeError(`${label} contains invalid JSON`) as TypeError & {
-      cause?: unknown;
-    };
-    wrapped.cause = error;
+    const wrapped = new TypeError(`${label} contains invalid JSON`);
+    Object.defineProperty(wrapped, 'cause', {
+      configurable: true,
+      value: error,
+      writable: true,
+    });
     throw wrapped;
   }
 }

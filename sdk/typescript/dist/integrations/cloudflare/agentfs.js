@@ -13,6 +13,12 @@ import { CloudflareToolCalls, } from './toolcalls.js';
 const DEFAULT_CHUNK_SIZE = 4096;
 const DEFAULT_MAX_ZERO_FILL_BYTES = 1024 * 1024;
 const AGENTFS_SCHEMA_VERSION = '0.4';
+function isPromiseLike(value) {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+        return false;
+    }
+    return typeof Reflect.get(Object(value), 'then') === 'function';
+}
 function createFsError(opts) {
     const err = new Error(`${opts.code}: ${opts.message}, ${opts.syscall} '${opts.path}'`);
     err.code = opts.code;
@@ -262,7 +268,13 @@ export class AgentFS {
             },
         };
         try {
-            return this.storage.transactionSync(() => callback(transaction));
+            return this.storage.transactionSync(() => {
+                const result = callback(transaction);
+                if (isPromiseLike(result)) {
+                    throw new TypeError('AgentFS transaction callback must be synchronous');
+                }
+                return result;
+            });
         }
         finally {
             open = false;

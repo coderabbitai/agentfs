@@ -1,28 +1,28 @@
 import type { CloudflareStorage } from './agentfs.js';
 export type CloudflareToolCallOutcome = {
-    kind: 'success';
-    result: unknown;
+    readonly kind: 'success';
+    readonly result: unknown;
 } | {
-    kind: 'error';
-    error: string;
+    readonly kind: 'error';
+    readonly error: string;
 };
 export interface CloudflareToolCallInput {
-    name: string;
-    parameters?: unknown;
-    outcome: CloudflareToolCallOutcome;
-    startedAt: number;
-    completedAt: number;
+    readonly name: string;
+    readonly parameters?: unknown;
+    readonly outcome: CloudflareToolCallOutcome;
+    readonly startedAt: number;
+    readonly completedAt: number;
 }
 export interface CloudflareToolCall extends CloudflareToolCallInput {
-    id: number;
-    durationMs: number;
+    readonly id: number;
+    readonly durationMs: number;
 }
 export interface CloudflareToolCallStats {
-    name: string;
-    totalCalls: number;
-    successful: number;
-    failed: number;
-    averageDurationMs: number;
+    readonly name: string;
+    readonly totalCalls: number;
+    readonly successful: number;
+    readonly failed: number;
+    readonly averageDurationMs: number;
 }
 export interface CloudflareToolCallsTransaction {
     record(call: CloudflareToolCallInput): number;
@@ -33,7 +33,7 @@ export interface CloudflareToolCallsOptions {
      * Runs immediately before parameters or successful results are serialized.
      * Applications that can receive secrets must supply their policy redactor.
      */
-    sanitize?: CloudflareToolCallSanitizer;
+    readonly sanitize?: CloudflareToolCallSanitizer;
 }
 /** Insert-only AgentFS tool-call storage over Durable Objects SQLite. */
 export declare class CloudflareToolCalls implements CloudflareToolCallsTransaction {

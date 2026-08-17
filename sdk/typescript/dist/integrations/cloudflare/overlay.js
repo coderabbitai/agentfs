@@ -1,3 +1,4 @@
+const MAX_QUERY_BINDINGS = 100;
 function validatePath(path) {
     if (!path.startsWith('/') ||
         path === '/' ||
@@ -90,9 +91,15 @@ export class CloudflareOverlayMetadata {
         for (let current = validatePath(path); current !== '/'; current = parentPath(current)) {
             ancestors.push(current);
         }
-        const placeholders = ancestors.map(() => '?').join(', ');
-        return this.storage.sql.exec(`SELECT 1 AS present FROM fs_whiteout
-       WHERE path IN (${placeholders}) LIMIT 1`, ...ancestors).toArray().length > 0;
+        for (let offset = 0; offset < ancestors.length; offset += MAX_QUERY_BINDINGS) {
+            const batch = ancestors.slice(offset, offset + MAX_QUERY_BINDINGS);
+            const placeholders = batch.map(() => '?').join(', ');
+            const present = this.storage.sql.exec(`SELECT 1 AS present FROM fs_whiteout
+         WHERE path IN (${placeholders}) LIMIT 1`, ...batch).toArray().length > 0;
+            if (present)
+                return true;
+        }
+        return false;
     }
     listChildWhiteouts(path) {
         return this.storage.sql.exec('SELECT path FROM fs_whiteout WHERE parent_path = ? ORDER BY path', validateDirectoryPath(path)).toArray().map(row => row.path);

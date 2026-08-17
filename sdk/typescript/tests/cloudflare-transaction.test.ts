@@ -85,6 +85,16 @@ describe('Cloudflare caller-owned transactions', () => {
     expect(() => rolledBack.readFile('/anything')).toThrow('transaction is already closed');
   });
 
+  it('rejects async callbacks before committing their mutations', async () => {
+    const { filesystem } = createFixture();
+
+    expect(() => filesystem.transactionSync(async transaction => {
+      transaction.writeFile('/async.md', 'must roll back');
+    })).toThrow('transaction callback must be synchronous');
+
+    await expect(filesystem.readFile('/async.md')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('zero-extends truncate growth through both mutation APIs', async () => {
     const { filesystem } = createFixture();
     await filesystem.writeFile('/file.bin', Buffer.from('abc'));

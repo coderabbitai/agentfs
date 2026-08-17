@@ -9,7 +9,8 @@ interface TestCursor<T> extends Iterable<T> {
   readonly columnNames: string[];
   readonly rowsRead: number;
   readonly rowsWritten: number;
-  next(): IteratorResult<T>;
+  next(): { done: boolean; value?: T };
+  [Symbol.iterator](): IterableIterator<T>;
 }
 
 class ArrayCursor<T> implements TestCursor<T> {
@@ -38,8 +39,8 @@ class ArrayCursor<T> implements TestCursor<T> {
     for (const row of this.rows) yield Object.values(Object(row));
   }
 
-  next(): IteratorResult<T> {
-    if (this.position >= this.rows.length) return { done: true, value: undefined };
+  next(): { done: boolean; value?: T } {
+    if (this.position >= this.rows.length) return { done: true };
     return { done: false, value: this.rows[this.position++] };
   }
 
@@ -54,22 +55,42 @@ function toSqlInputValue(value: unknown): SQLInputValue {
     typeof value === 'string' ||
     typeof value === 'number' ||
     typeof value === 'bigint' ||
-    ArrayBuffer.isView(value)
+    isSqlArrayBufferView(value)
   ) {
     return value;
   }
   throw new TypeError('unsupported SQLite binding in Cloudflare storage test adapter');
 }
 
+function isSqlArrayBufferView(value: unknown): value is NodeJS.ArrayBufferView {
+  return ArrayBuffer.isView(value);
+}
+
+function queryRows<T>(
+  database: DatabaseSync,
+  query: string,
+  bindings: SQLInputValue[],
+): T[];
+function queryRows(
+  database: DatabaseSync,
+  query: string,
+  bindings: SQLInputValue[],
+): unknown[] {
+  return database.prepare(query).all(...bindings);
+}
+
 export function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
   return {
     sql: {
-      exec<T>(query: string, ...bindings: unknown[]) {
+      exec<T = Record<string, unknown>>(
+        query: string,
+        ...bindings: unknown[]
+      ): TestCursor<T> {
         if (bindings.length === 0 && query.includes(';')) {
           database.exec(query);
           return new ArrayCursor<T>([]);
         }
-        return new ArrayCursor(database.prepare(query).all<T>(...bindings.map(toSqlInputValue)));
+        return new ArrayCursor<T>(queryRows<T>(database, query, bindings.map(toSqlInputValue)));
       },
       get databaseSize() {
         return 0;

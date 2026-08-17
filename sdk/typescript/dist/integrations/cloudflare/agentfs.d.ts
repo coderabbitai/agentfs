@@ -11,8 +11,8 @@ import { CloudflareKvStore, type CloudflareKvTransaction } from './kvstore.js';
 import { CloudflareOverlayMetadata, type CloudflareOverlayTransaction } from './overlay.js';
 import { CloudflareToolCalls, type CloudflareToolCallSanitizer, type CloudflareToolCallsTransaction } from './toolcalls.js';
 export interface CloudflareAgentFSOptions {
-    maxZeroFillBytes?: number;
-    sanitizeToolCallValue?: CloudflareToolCallSanitizer;
+    readonly maxZeroFillBytes?: number;
+    readonly sanitizeToolCallValue?: CloudflareToolCallSanitizer;
 }
 /**
  * Cloudflare Durable Objects SqlStorage cursor interface
