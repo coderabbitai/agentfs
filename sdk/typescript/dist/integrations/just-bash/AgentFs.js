@@ -1,0 +1,445 @@
+/**
+ * AgentFs - Read-write filesystem backed by any AgentFS FileSystem implementation
+ *
+ * Full read-write filesystem that persists to a SQLite database.
+ * Designed for AI agents needing persistent, auditable file storage.
+ *
+ * Supports any FileSystem implementation:
+ * - AgentFS (Turso/libsql) for Node.js and browser
+ * - Cloudflare AgentFS (Durable Objects) for Cloudflare Workers
+ *
+ * @see https://docs.turso.tech/agentfs/sdk/typescript
+ */
+import { AgentFS } from "../../index_node.js";
+// Text encoder/decoder for encoding conversions
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
+/**
+ * Helper to convert content to Uint8Array
+ */
+function toBuffer(content, encoding) {
+    if (content instanceof Uint8Array) {
+        return content;
+    }
+    switch (encoding) {
+        case "base64":
+            return Uint8Array.from(atob(content), (c) => c.charCodeAt(0));
+        case "hex": {
+            const bytes = new Uint8Array(content.length / 2);
+            for (let i = 0; i < content.length; i += 2) {
+                bytes[i / 2] = parseInt(content.slice(i, i + 2), 16);
+            }
+            return bytes;
+        }
+        case "binary":
+        case "latin1":
+            return Uint8Array.from(content, (c) => c.charCodeAt(0));
+        default:
+            return textEncoder.encode(content);
+    }
+}
+/**
+ * Helper to convert Uint8Array to string with encoding
+ */
+function fromBuffer(buffer, encoding) {
+    switch (encoding) {
+        case "base64":
+            return btoa(String.fromCharCode(...buffer));
+        case "hex":
+            return Array.from(buffer)
+                .map((b) => b.toString(16).padStart(2, "0"))
+                .join("");
+        case "binary":
+        case "latin1":
+            return String.fromCharCode(...buffer);
+        default:
+            return textDecoder.decode(buffer);
+    }
+}
+function getEncoding(options) {
+    if (options === null || options === undefined) {
+        return undefined;
+    }
+    if (typeof options === "string") {
+        return options;
+    }
+    return options.encoding ?? undefined;
+}
+/** Default mount point for AgentFs */
+const DEFAULT_MOUNT_POINT = "/";
+export class AgentFsWrapper {
+    agentFs;
+    mountPoint;
+    constructor(options) {
+        this.agentFs = options.fs.fs;
+        // Normalize mount point
+        const mp = options.mountPoint ?? DEFAULT_MOUNT_POINT;
+        this.mountPoint = mp === "/" ? "/" : mp.replace(/\/+$/, "");
+        if (!this.mountPoint.startsWith("/")) {
+            throw new Error(`Mount point must be an absolute path: ${mp}`);
+        }
+    }
+    /**
+     * Get the mount point for this filesystem
+     */
+    getMountPoint() {
+        return this.mountPoint;
+    }
+    /**
+     * Normalize a virtual path (resolve . and .., ensure starts with /)
+     */
+    normalizePath(path) {
+        if (!path || path === "/")
+            return "/";
+        let normalized = path.endsWith("/") && path !== "/" ? path.slice(0, -1) : path;
+        if (!normalized.startsWith("/")) {
+            normalized = `/${normalized}`;
+        }
+        const parts = normalized.split("/").filter((p) => p && p !== ".");
+        const resolved = [];
+        for (const part of parts) {
+            if (part === "..") {
+                resolved.pop();
+            }
+            else {
+                resolved.push(part);
+            }
+        }
+        return `/${resolved.join("/")}` || "/";
+    }
+    /**
+     * Convert virtual path to AgentFS path (strip mount point prefix)
+     */
+    toAgentPath(virtualPath) {
+        const normalized = this.normalizePath(virtualPath);
+        if (this.mountPoint === "/") {
+            return normalized;
+        }
+        if (normalized === this.mountPoint) {
+            return "/";
+        }
+        if (normalized.startsWith(`${this.mountPoint}/`)) {
+            return normalized.slice(this.mountPoint.length);
+        }
+        // Path is outside mount point
+        return normalized;
+    }
+    dirname(path) {
+        const normalized = this.normalizePath(path);
+        if (normalized === "/")
+            return "/";
+        const lastSlash = normalized.lastIndexOf("/");
+        return lastSlash === 0 ? "/" : normalized.slice(0, lastSlash);
+    }
+    async readFile(path, options) {
+        const buffer = await this.readFileBuffer(path);
+        const encoding = getEncoding(options);
+        return fromBuffer(buffer, encoding);
+    }
+    async readFileBuffer(path) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        try {
+            const data = await this.agentFs.readFile(agentPath);
+            if (typeof data === "string") {
+                return textEncoder.encode(data);
+            }
+            return new Uint8Array(data);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("not found") || msg.includes("ENOENT")) {
+                throw new Error(`ENOENT: no such file or directory, open '${path}'`);
+            }
+            throw e;
+        }
+    }
+    async writeFile(path, content, options) {
+        const normalized = this.normalizePath(path);
+        const encoding = getEncoding(options);
+        const buffer = toBuffer(content, encoding);
+        const agentPath = this.toAgentPath(normalized);
+        // AgentFS creates parent directories implicitly
+        await this.agentFs.writeFile(agentPath, Buffer.from(buffer));
+    }
+    async appendFile(path, content, options) {
+        const normalized = this.normalizePath(path);
+        const encoding = getEncoding(options);
+        const newBuffer = toBuffer(content, encoding);
+        // Try to read existing content
+        let existingBuffer;
+        try {
+            existingBuffer = await this.readFileBuffer(normalized);
+        }
+        catch {
+            existingBuffer = new Uint8Array(0);
+        }
+        const combined = new Uint8Array(existingBuffer.length + newBuffer.length);
+        combined.set(existingBuffer);
+        combined.set(newBuffer, existingBuffer.length);
+        await this.writeFile(normalized, combined);
+    }
+    async exists(path) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        try {
+            await this.agentFs.access(agentPath);
+            return true;
+        }
+        catch {
+            return false;
+        }
+    }
+    async stat(path) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        try {
+            const stats = await this.agentFs.stat(agentPath);
+            return {
+                isFile: stats.isFile(),
+                isDirectory: stats.isDirectory(),
+                isSymbolicLink: stats.isSymbolicLink(),
+                mode: stats.mode,
+                size: stats.size,
+                mtime: new Date(stats.mtime * 1000),
+            };
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("not found") || msg.includes("ENOENT")) {
+                throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
+            }
+            throw e;
+        }
+    }
+    async lstat(path) {
+        // AgentFS stat doesn't follow symlinks by default
+        return this.stat(path);
+    }
+    async mkdir(path, options) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        if (options?.recursive) {
+            // Create parent directories first
+            const parent = this.dirname(normalized);
+            if (parent !== "/" && parent !== normalized) {
+                const parentExists = await this.exists(parent);
+                if (!parentExists) {
+                    await this.mkdir(parent, { recursive: true });
+                }
+            }
+        }
+        try {
+            await this.agentFs.mkdir(agentPath);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("EEXIST") || msg.includes("already exists")) {
+                if (!options?.recursive) {
+                    throw new Error(`EEXIST: file already exists, mkdir '${path}'`);
+                }
+                // With recursive, existing dir is ok
+                return;
+            }
+            if (msg.includes("ENOENT") || msg.includes("not found")) {
+                throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
+            }
+            throw e;
+        }
+    }
+    async readdir(path) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        try {
+            const entries = await this.agentFs.readdir(agentPath);
+            return entries.sort();
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("not found") || msg.includes("ENOENT")) {
+                throw new Error(`ENOENT: no such file or directory, scandir '${path}'`);
+            }
+            throw e;
+        }
+    }
+    async rm(path, options) {
+        const normalized = this.normalizePath(path);
+        const agentPath = this.toAgentPath(normalized);
+        try {
+            await this.agentFs.rm(agentPath, {
+                force: options?.force,
+                recursive: options?.recursive,
+            });
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("ENOENT") || msg.includes("not found")) {
+                if (!options?.force) {
+                    throw new Error(`ENOENT: no such file or directory, rm '${path}'`);
+                }
+                return;
+            }
+            if (msg.includes("ENOTEMPTY") || msg.includes("not empty")) {
+                throw new Error(`ENOTEMPTY: directory not empty, rm '${path}'`);
+            }
+            if (msg.includes("EISDIR")) {
+                // Directory without recursive - try rmdir for empty directories
+                try {
+                    await this.agentFs.rmdir(agentPath);
+                    return;
+                }
+                catch (rmdirErr) {
+                    const rmdirMsg = rmdirErr instanceof Error ? rmdirErr.message : String(rmdirErr);
+                    if (rmdirMsg.includes("ENOTEMPTY") ||
+                        rmdirMsg.includes("not empty")) {
+                        throw new Error(`ENOTEMPTY: directory not empty, rm '${path}'`);
+                    }
+                    throw rmdirErr;
+                }
+            }
+            throw e;
+        }
+    }
+    async cp(src, dest, options) {
+        const srcNorm = this.normalizePath(src);
+        const destNorm = this.normalizePath(dest);
+        const srcAgent = this.toAgentPath(srcNorm);
+        const destAgent = this.toAgentPath(destNorm);
+        const srcStat = await this.stat(srcNorm);
+        if (srcStat.isFile) {
+            // Use native copyFile for files
+            await this.agentFs.copyFile(srcAgent, destAgent);
+        }
+        else if (srcStat.isDirectory) {
+            if (!options?.recursive) {
+                throw new Error(`EISDIR: is a directory, cp '${src}'`);
+            }
+            // Recursively copy directory
+            await this.mkdir(destNorm, { recursive: true });
+            const children = await this.readdir(srcNorm);
+            for (const child of children) {
+                const srcChild = srcNorm === "/" ? `/${child}` : `${srcNorm}/${child}`;
+                const destChild = destNorm === "/" ? `/${child}` : `${destNorm}/${child}`;
+                await this.cp(srcChild, destChild, options);
+            }
+        }
+    }
+    async mv(src, dest) {
+        const srcNorm = this.normalizePath(src);
+        const destNorm = this.normalizePath(dest);
+        const srcAgent = this.toAgentPath(srcNorm);
+        const destAgent = this.toAgentPath(destNorm);
+        try {
+            await this.agentFs.rename(srcAgent, destAgent);
+        }
+        catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes("ENOENT") || msg.includes("not found")) {
+                throw new Error(`ENOENT: no such file or directory, mv '${src}'`);
+            }
+            throw e;
+        }
+    }
+    resolvePath(base, path) {
+        if (path.startsWith("/")) {
+            return this.normalizePath(path);
+        }
+        const combined = base === "/" ? `/${path}` : `${base}/${path}`;
+        return this.normalizePath(combined);
+    }
+    getAllPaths() {
+        // AgentFS doesn't provide a way to list all paths efficiently
+        return [];
+    }
+    async chmod(path, mode) {
+        const normalized = this.normalizePath(path);
+        // Verify path exists
+        const pathExists = await this.exists(normalized);
+        if (!pathExists) {
+            throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
+        }
+        // AgentFS doesn't support chmod yet - this is a no-op
+        void mode;
+    }
+    async symlink(target, linkPath) {
+        const normalized = this.normalizePath(linkPath);
+        const pathExists = await this.exists(normalized);
+        if (pathExists) {
+            throw new Error(`EEXIST: file already exists, symlink '${linkPath}'`);
+        }
+        // Use JSON workaround for symlinks - this provides consistent behavior
+        // across all FileSystem implementations and allows reading symlink content
+        const content = JSON.stringify({ __symlink: target });
+        await this.writeFile(normalized, content);
+    }
+    async link(existingPath, newPath) {
+        const existingNorm = this.normalizePath(existingPath);
+        const newNorm = this.normalizePath(newPath);
+        const existingAgent = this.toAgentPath(existingNorm);
+        const newAgent = this.toAgentPath(newNorm);
+        const existingStat = await this.stat(existingNorm);
+        if (!existingStat.isFile) {
+            throw new Error(`EPERM: operation not permitted, link '${existingPath}'`);
+        }
+        const newExists = await this.exists(newNorm);
+        if (newExists) {
+            throw new Error(`EEXIST: file already exists, link '${newPath}'`);
+        }
+        // Use copyFile for hard link emulation
+        await this.agentFs.copyFile(existingAgent, newAgent);
+    }
+    async readlink(path) {
+        const normalized = this.normalizePath(path);
+        const pathExists = await this.exists(normalized);
+        if (!pathExists) {
+            throw new Error(`ENOENT: no such file or directory, readlink '${path}'`);
+        }
+        // Read as JSON symlink workaround
+        try {
+            const content = await this.readFile(normalized);
+            const parsed = JSON.parse(content);
+            if (parsed.__symlink) {
+                return parsed.__symlink;
+            }
+        }
+        catch {
+            // Not a JSON symlink
+        }
+        throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
+    }
+}
+/**
+ * Create a just-bash compatible filesystem backed by any AgentFS FileSystem.
+ *
+ * @example Node.js with Turso:
+ * ```ts
+ * import { agentfs } from "agentfs-sdk/just-bash";
+ *
+ * const fs = await agentfs({ path: "agent.db" });
+ * const bashTool = createBashTool({ fs });
+ * ```
+ *
+ * @example Cloudflare Workers:
+ * ```ts
+ * import { agentfs } from "agentfs-sdk/just-bash";
+ * import { AgentFS } from "agentfs-sdk/cloudflare";
+ *
+ * // In a Durable Object:
+ * const agentFs = AgentFS.create(ctx.storage);
+ * const fs = agentfs({ fs: agentFs });
+ * const bashTool = createBashTool({ fs });
+ * ```
+ */
+export async function agentfs(handleOrOptions, mountPoint) {
+    // Check if it's a FileSystem directly (has stat method but not a handle)
+    if (typeof handleOrOptions.stat === 'function' && !('fs' in handleOrOptions)) {
+        return new AgentFsWrapper({ fs: { fs: handleOrOptions }, mountPoint });
+    }
+    // Check if it's an AgentFsHandle (has fs property containing a FileSystem)
+    if ("fs" in handleOrOptions && typeof handleOrOptions.fs?.stat === 'function') {
+        return new AgentFsWrapper({ fs: handleOrOptions, mountPoint });
+    }
+    // Otherwise it's AgentFSOptions for creating a new Turso-based AgentFS
+    const handle = await AgentFS.open(handleOrOptions);
+    return new AgentFsWrapper({ fs: handle, mountPoint });
+}

@@ -1,0 +1,3 @@
+export declare const cloudflareTransactionViewCapability: unique symbol;
+export type CloudflareTransactionViewCapability = typeof cloudflareTransactionViewCapability;
+export declare function assertTransactionViewCapability(capability: CloudflareTransactionViewCapability): void;

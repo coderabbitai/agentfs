@@ -32,7 +32,6 @@ describe("AgentFS Integration Tests", () => {
     });
 
     it("should require at least id or path", async () => {
-      // @ts-expect-error - Testing runtime validation for JS users
       await expect(AgentFS.open({})).rejects.toThrow(
         "AgentFS.open() requires at least 'id' or 'path'"
       );
