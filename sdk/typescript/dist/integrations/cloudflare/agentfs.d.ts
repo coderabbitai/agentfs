@@ -49,6 +49,7 @@ export interface CloudflareAgentFSTransaction {
     readonly tools: CloudflareToolCallsTransaction;
     readonly overlay: CloudflareOverlayTransaction;
     readFile(path: string): Buffer;
+    stat(path: string): Stats;
     writeFile(path: string, content: string | Buffer, options?: BufferEncoding | {
         encoding?: BufferEncoding;
     }): void;
@@ -134,6 +135,7 @@ export declare class AgentFS implements FileSystem {
     readdir(path: string): Promise<string[]>;
     readdirPlus(path: string): Promise<DirEntry[]>;
     stat(path: string): Promise<Stats>;
+    private statSync;
     lstat(path: string): Promise<Stats>;
     mkdir(path: string): Promise<void>;
     rmdir(path: string): Promise<void>;

@@ -214,6 +214,7 @@ export class AgentFS {
             tools: this.tools.transactionView(),
             overlay: this.overlay.transactionView(),
             readFile: path => this.readFileSync(path),
+            stat: path => this.statSync(path),
             writeFile: (path, content, options) => this.writeFileSync(path, content, options),
             unlink: path => this.unlinkSync(path),
             rm: (path, options) => this.rmSync(path, options),
@@ -532,6 +533,9 @@ export class AgentFS {
         }));
     }
     async stat(path) {
+        return this.statSync(path);
+    }
+    statSync(path) {
         const { normalizedPath, ino } = this.resolvePathOrThrow(path, 'stat');
         const rows = this.storage.sql.exec(`SELECT ino, mode, nlink, uid, gid, size, atime, mtime, ctime
        FROM fs_inode WHERE ino = ?`, ino).toArray();
