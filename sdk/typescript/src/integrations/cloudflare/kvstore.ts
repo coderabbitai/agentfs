@@ -1,4 +1,5 @@
 import type { CloudflareStorage } from './agentfs.js';
+import { parseStoredJson, serializeJson } from './json.js';
 
 export interface CloudflareKvEntry<T = unknown> {
   key: string;
@@ -7,22 +8,9 @@ export interface CloudflareKvEntry<T = unknown> {
 
 export interface CloudflareKvTransaction {
   set(key: string, value: unknown): void;
-  get<T = unknown>(key: string): T | undefined;
-  list<T = unknown>(prefix: string): CloudflareKvEntry<T>[];
+  get(key: string): unknown | undefined;
+  list(prefix: string): CloudflareKvEntry[];
   delete(key: string): void;
-}
-
-function serializeJson(value: unknown): string {
-  let serialized: string | undefined;
-  try {
-    serialized = JSON.stringify(value);
-  } catch {
-    throw new TypeError('KV values must be JSON-serializable');
-  }
-  if (serialized === undefined) {
-    throw new TypeError('KV values must be JSON-serializable');
-  }
-  return serialized;
 }
 
 function escapeLike(value: string): string {
@@ -51,12 +39,24 @@ export class CloudflareKvStore implements CloudflareKvTransaction {
     `);
   }
 
-  transactionView(): CloudflareKvTransaction {
+  transactionView(assertOpen: () => void = () => undefined): CloudflareKvTransaction {
     return {
-      set: (key, value) => this.setSync(key, value),
-      get: <T = unknown>(key: string) => this.get<T>(key),
-      list: <T = unknown>(prefix: string) => this.list<T>(prefix),
-      delete: key => this.deleteSync(key),
+      set: (key, value) => {
+        assertOpen();
+        this.setSync(key, value);
+      },
+      get: key => {
+        assertOpen();
+        return this.get(key);
+      },
+      list: prefix => {
+        assertOpen();
+        return this.list(prefix);
+      },
+      delete: key => {
+        assertOpen();
+        this.deleteSync(key);
+      },
     };
   }
 
@@ -65,7 +65,7 @@ export class CloudflareKvStore implements CloudflareKvTransaction {
   }
 
   private setSync(key: string, value: unknown): void {
-    const serialized = serializeJson(value);
+    const serialized = serializeJson('KV values', value);
     this.storage.sql.exec(
       `INSERT INTO kv_store (key, value, updated_at)
        VALUES (?, ?, unixepoch())
@@ -77,21 +77,26 @@ export class CloudflareKvStore implements CloudflareKvTransaction {
     );
   }
 
-  get<T = unknown>(key: string): T | undefined {
+  get(key: string): unknown | undefined {
     const rows = this.storage.sql.exec<{ value: string }>(
       'SELECT value FROM kv_store WHERE key = ?',
       key,
     ).toArray();
-    return rows.length === 0 ? undefined : JSON.parse(rows[0].value) as T;
+    return rows.length === 0
+      ? undefined
+      : parseStoredJson(`stored KV value for ${key}`, rows[0].value);
   }
 
-  list<T = unknown>(prefix: string): CloudflareKvEntry<T>[] {
+  list(prefix: string): CloudflareKvEntry[] {
     return this.storage.sql.exec<{ key: string; value: string }>(
       `SELECT key, value FROM kv_store
        WHERE key LIKE ? ESCAPE '\\'
        ORDER BY key`,
       `${escapeLike(prefix)}%`,
-    ).toArray().map(row => ({ key: row.key, value: JSON.parse(row.value) as T }));
+    ).toArray().map(row => ({
+      key: row.key,
+      value: parseStoredJson(`stored KV value for ${row.key}`, row.value),
+    }));
   }
 
   delete(key: string): void {

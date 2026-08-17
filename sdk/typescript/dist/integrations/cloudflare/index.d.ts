@@ -26,8 +26,8 @@
  *
  * @see https://developers.cloudflare.com/durable-objects/
  */
-export { AgentFS, type CloudflareAgentFSTransaction, type CloudflareStorage, } from "./agentfs.js";
+export { AgentFS, type CloudflareAgentFSTransaction, type CloudflareAgentFSOptions, type CloudflareStorage, } from "./agentfs.js";
 export { CloudflareKvStore, type CloudflareKvEntry, type CloudflareKvTransaction, } from "./kvstore.js";
 export { CloudflareOverlayMetadata, type CloudflareOverlayTransaction, } from "./overlay.js";
-export { CloudflareToolCalls, type CloudflareToolCall, type CloudflareToolCallInput, type CloudflareToolCallOutcome, type CloudflareToolCallsTransaction, type CloudflareToolCallStats, } from "./toolcalls.js";
+export { CloudflareToolCalls, type CloudflareToolCall, type CloudflareToolCallInput, type CloudflareToolCallOutcome, type CloudflareToolCallSanitizer, type CloudflareToolCallsOptions, type CloudflareToolCallsTransaction, type CloudflareToolCallStats, } from "./toolcalls.js";
 export type { FileSystem, Stats, DirEntry, FilesystemStats, FileHandle, } from "../../filesystem/interface.js";

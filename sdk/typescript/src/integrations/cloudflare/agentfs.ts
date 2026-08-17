@@ -28,11 +28,18 @@ import {
 } from './overlay.js';
 import {
   CloudflareToolCalls,
+  type CloudflareToolCallSanitizer,
   type CloudflareToolCallsTransaction,
 } from './toolcalls.js';
 
 const DEFAULT_CHUNK_SIZE = 4096;
+const DEFAULT_MAX_ZERO_FILL_BYTES = 1024 * 1024;
 const AGENTFS_SCHEMA_VERSION = '0.4';
+
+export interface CloudflareAgentFSOptions {
+  maxZeroFillBytes?: number;
+  sanitizeToolCallValue?: CloudflareToolCallSanitizer;
+}
 
 /**
  * Cloudflare Durable Objects SqlStorage cursor interface
@@ -111,11 +118,18 @@ class AgentFSFile implements FileHandle {
   private storage: CloudflareStorage;
   private ino: number;
   private chunkSize: number;
+  private maxZeroFillBytes: number;
 
-  constructor(storage: CloudflareStorage, ino: number, chunkSize: number) {
+  constructor(
+    storage: CloudflareStorage,
+    ino: number,
+    chunkSize: number,
+    maxZeroFillBytes: number,
+  ) {
     this.storage = storage;
     this.ino = ino;
     this.chunkSize = chunkSize;
+    this.maxZeroFillBytes = maxZeroFillBytes;
   }
 
   async pread(offset: number, size: number): Promise<Buffer> {
@@ -219,6 +233,11 @@ class AgentFSFile implements FileHandle {
   }
 
   private writeZerosAtOffset(offset: number, length: number): void {
+    if (length > this.maxZeroFillBytes) {
+      throw new RangeError(
+        `zero-fill gap of ${length} bytes exceeds the ${this.maxZeroFillBytes} byte limit`,
+      );
+    }
     const zeroChunk = Buffer.alloc(this.chunkSize);
     for (let written = 0; written < length; written += this.chunkSize) {
       this.writeDataAtOffset(
@@ -341,15 +360,26 @@ export class AgentFS implements FileSystem {
   private storage: CloudflareStorage;
   private rootIno: number = 1;
   private chunkSize: number = DEFAULT_CHUNK_SIZE;
+  private readonly maxZeroFillBytes: number;
   readonly kv: CloudflareKvStore;
   readonly tools: CloudflareToolCalls;
   readonly overlay: CloudflareOverlayMetadata;
 
-  private constructor(storage: CloudflareStorage) {
+  private constructor(
+    storage: CloudflareStorage,
+    options: CloudflareAgentFSOptions,
+  ) {
     this.storage = storage;
+    const maxZeroFillBytes = options.maxZeroFillBytes ?? DEFAULT_MAX_ZERO_FILL_BYTES;
+    if (!Number.isSafeInteger(maxZeroFillBytes) || maxZeroFillBytes < 0) {
+      throw new RangeError('maxZeroFillBytes must be a non-negative safe integer');
+    }
+    this.maxZeroFillBytes = maxZeroFillBytes;
     this.initialize();
     this.kv = new CloudflareKvStore(storage);
-    this.tools = new CloudflareToolCalls(storage);
+    this.tools = new CloudflareToolCalls(storage, {
+      sanitize: options.sanitizeToolCallValue,
+    });
     this.overlay = new CloudflareOverlayMetadata(storage);
   }
 
@@ -358,8 +388,11 @@ export class AgentFS implements FileSystem {
    *
    * @param storage - The ctx.storage from a Durable Object
    */
-  static create(storage: CloudflareStorage): AgentFS {
-    return new AgentFS(storage);
+  static create(
+    storage: CloudflareStorage,
+    options: CloudflareAgentFSOptions = {},
+  ): AgentFS {
+    return new AgentFS(storage, options);
   }
 
   getChunkSize(): number {
@@ -374,19 +407,48 @@ export class AgentFS implements FileSystem {
    * application tables changed in the same callback.
    */
   transactionSync<T>(callback: (transaction: CloudflareAgentFSTransaction) => T): T {
-    const transaction: CloudflareAgentFSTransaction = {
-      kv: this.kv.transactionView(),
-      tools: this.tools.transactionView(),
-      overlay: this.overlay.transactionView(),
-      readFile: path => this.readFileSync(path),
-      stat: path => this.statSync(path),
-      writeFile: (path, content, options) => this.writeFileSync(path, content, options),
-      unlink: path => this.unlinkSync(path),
-      rm: (path, options) => this.rmSync(path, options),
-      rename: (oldPath, newPath) => this.renameSync(oldPath, newPath),
-      truncate: (path, newSize) => this.truncateSync(path, newSize),
+    let open = true;
+    const assertOpen = (): void => {
+      if (!open) throw new Error('AgentFS transaction is already closed');
     };
-    return this.storage.transactionSync(() => callback(transaction));
+    const transaction: CloudflareAgentFSTransaction = {
+      kv: this.kv.transactionView(assertOpen),
+      tools: this.tools.transactionView(assertOpen),
+      overlay: this.overlay.transactionView(assertOpen),
+      readFile: path => {
+        assertOpen();
+        return this.readFileSync(path);
+      },
+      stat: path => {
+        assertOpen();
+        return this.statSync(path);
+      },
+      writeFile: (path, content, options) => {
+        assertOpen();
+        this.writeFileSync(path, content, options);
+      },
+      unlink: path => {
+        assertOpen();
+        this.unlinkSync(path);
+      },
+      rm: (path, options) => {
+        assertOpen();
+        this.rmSync(path, options);
+      },
+      rename: (oldPath, newPath) => {
+        assertOpen();
+        this.renameSync(oldPath, newPath);
+      },
+      truncate: (path, newSize) => {
+        assertOpen();
+        this.truncateSync(path, newSize);
+      },
+    };
+    try {
+      return this.storage.transactionSync(() => callback(transaction));
+    } finally {
+      open = false;
+    }
   }
 
   private initialize(): void {
@@ -1010,22 +1072,7 @@ export class AgentFS implements FileSystem {
 
     const parent = this.resolveParent(normalizedPath)!;
 
-    this.storage.sql.exec(
-      'DELETE FROM fs_dentry WHERE parent_ino = ? AND name = ?',
-      parent.parentIno, parent.name
-    );
-
-    this.storage.sql.exec(
-      'UPDATE fs_inode SET nlink = nlink - 1 WHERE ino = ?',
-      ino
-    );
-
-    const linkCount = this.getLinkCount(ino);
-    if (linkCount === 0) {
-      this.storage.sql.exec('DELETE FROM fs_inode WHERE ino = ?', ino);
-      this.storage.sql.exec('DELETE FROM fs_data WHERE ino = ?', ino);
-      this.storage.sql.exec('DELETE FROM fs_symlink WHERE ino = ?', ino);
-    }
+    this.removeDentryAndMaybeInode(parent.parentIno, parent.name, ino);
   }
 
   async rm(
@@ -1207,45 +1254,43 @@ export class AgentFS implements FileSystem {
     }
 
     const newIno = this.resolvePath(newNormalized);
-    if (newIno !== null) {
-      const newMode = this.getInodeMode(newIno);
-      if (newMode !== null) {
-        const newIsDir = (newMode & S_IFMT) === S_IFDIR;
+    const newMode = newIno === null ? null : this.getInodeMode(newIno);
+    if (newIno !== null && newMode !== null) {
+      const newIsDir = (newMode & S_IFMT) === S_IFDIR;
 
-        if (newIsDir && !oldIsDir) {
-          throw createFsError({
-            code: 'EISDIR',
-            syscall: 'rename',
-            path: newNormalized,
-            message: 'illegal operation on a directory',
-          });
-        }
-        if (!newIsDir && oldIsDir) {
-          throw createFsError({
-            code: 'ENOTDIR',
-            syscall: 'rename',
-            path: newNormalized,
-            message: 'not a directory',
-          });
-        }
-
-        if (newIsDir) {
-          const children = this.storage.sql.exec<{ one: number }>(
-            'SELECT 1 as one FROM fs_dentry WHERE parent_ino = ? LIMIT 1',
-            newIno
-          ).toArray();
-          if (children.length > 0) {
-            throw createFsError({
-              code: 'ENOTEMPTY',
-              syscall: 'rename',
-              path: newNormalized,
-              message: 'directory not empty',
-            });
-          }
-        }
-
-        this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno);
+      if (newIsDir && !oldIsDir) {
+        throw createFsError({
+          code: 'EISDIR',
+          syscall: 'rename',
+          path: newNormalized,
+          message: 'illegal operation on a directory',
+        });
       }
+      if (!newIsDir && oldIsDir) {
+        throw createFsError({
+          code: 'ENOTDIR',
+          syscall: 'rename',
+          path: newNormalized,
+          message: 'not a directory',
+        });
+      }
+
+      if (newIsDir) {
+        const children = this.storage.sql.exec<{ one: number }>(
+          'SELECT 1 as one FROM fs_dentry WHERE parent_ino = ? LIMIT 1',
+          newIno
+        ).toArray();
+        if (children.length > 0) {
+          throw createFsError({
+            code: 'ENOTEMPTY',
+            syscall: 'rename',
+            path: newNormalized,
+            message: 'directory not empty',
+          });
+        }
+      }
+
+      this.removeDentryAndMaybeInode(newParent.parentIno, newParent.name, newIno);
     }
 
     this.storage.sql.exec(
@@ -1273,7 +1318,12 @@ export class AgentFS implements FileSystem {
         message: 'illegal operation on a directory',
       });
     }
-    new AgentFSFile(this.storage, ino, this.chunkSize).truncateSync(newSize);
+    new AgentFSFile(
+      this.storage,
+      ino,
+      this.chunkSize,
+      this.maxZeroFillBytes,
+    ).truncateSync(newSize);
   }
 
   async copyFile(src: string, dest: string): Promise<void> {
@@ -1497,7 +1547,12 @@ export class AgentFS implements FileSystem {
       });
     }
 
-    return new AgentFSFile(this.storage, ino, this.chunkSize);
+    return new AgentFSFile(
+      this.storage,
+      ino,
+      this.chunkSize,
+      this.maxZeroFillBytes,
+    );
   }
 
   // Legacy alias

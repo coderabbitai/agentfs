@@ -64,12 +64,24 @@ export class CloudflareOverlayMetadata implements CloudflareOverlayTransaction {
     `);
   }
 
-  transactionView(): CloudflareOverlayTransaction {
+  transactionView(assertOpen: () => void = () => undefined): CloudflareOverlayTransaction {
     return {
-      createWhiteout: (path, createdAt) => this.createWhiteoutSync(path, createdAt),
-      removeWhiteout: path => this.removeWhiteoutSync(path),
-      setOrigin: (deltaIno, baseIno) => this.setOriginSync(deltaIno, baseIno),
-      removeOrigin: deltaIno => this.removeOriginSync(deltaIno),
+      createWhiteout: (path, createdAt) => {
+        assertOpen();
+        this.createWhiteoutSync(path, createdAt);
+      },
+      removeWhiteout: path => {
+        assertOpen();
+        this.removeWhiteoutSync(path);
+      },
+      setOrigin: (deltaIno, baseIno) => {
+        assertOpen();
+        this.setOriginSync(deltaIno, baseIno);
+      },
+      removeOrigin: deltaIno => {
+        assertOpen();
+        this.removeOriginSync(deltaIno);
+      },
     };
   }
 
@@ -103,16 +115,20 @@ export class CloudflareOverlayMetadata implements CloudflareOverlayTransaction {
   }
 
   isWhiteout(path: string): boolean {
-    let current = validatePath(path);
-    while (current !== '/') {
-      const rows = this.storage.sql.exec<{ present: number }>(
-        'SELECT 1 AS present FROM fs_whiteout WHERE path = ? LIMIT 1',
-        current,
-      ).toArray();
-      if (rows.length > 0) return true;
-      current = parentPath(current);
+    const ancestors: string[] = [];
+    for (
+      let current = validatePath(path);
+      current !== '/';
+      current = parentPath(current)
+    ) {
+      ancestors.push(current);
     }
-    return false;
+    const placeholders = ancestors.map(() => '?').join(', ');
+    return this.storage.sql.exec<{ present: number }>(
+      `SELECT 1 AS present FROM fs_whiteout
+       WHERE path IN (${placeholders}) LIMIT 1`,
+      ...ancestors,
+    ).toArray().length > 0;
   }
 
   listChildWhiteouts(path: string): string[] {

@@ -1,48 +1,11 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   AgentFS,
-  type CloudflareStorage,
+  type CloudflareAgentFSTransaction,
 } from '../src/integrations/cloudflare/index.js';
-
-function cursor<T>(rows: T[]) {
-  return {
-    toArray: () => rows,
-    one: () => {
-      if (rows.length !== 1) throw new Error(`expected one row, received ${rows.length}`);
-      return rows[0];
-    },
-  } as ReturnType<CloudflareStorage['sql']['exec']>;
-}
-
-function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
-  return {
-    sql: {
-      exec<T>(query: string, ...bindings: unknown[]) {
-        if (bindings.length === 0 && query.includes(';')) {
-          database.exec(query);
-          return cursor<T>([]);
-        }
-        return cursor(database.prepare(query).all(...bindings as SQLInputValue[]) as T[]);
-      },
-      get databaseSize() {
-        return 0;
-      },
-    },
-    transactionSync<T>(callback: () => T): T {
-      database.exec('BEGIN IMMEDIATE');
-      try {
-        const result = callback();
-        database.exec('COMMIT');
-        return result;
-      } catch (error) {
-        database.exec('ROLLBACK');
-        throw error;
-      }
-    },
-  };
-}
+import { cloudflareStorage } from './cloudflare-test-storage.js';
 
 describe('Cloudflare caller-owned transactions', () => {
   const databases: DatabaseSync[] = [];
@@ -95,6 +58,33 @@ describe('Cloudflare caller-owned transactions', () => {
     expect(database.prepare('SELECT COUNT(*) AS count FROM app_metadata').get()).toEqual({ count: 0 });
   });
 
+  it('invalidates escaped transaction surfaces after commit and rollback', () => {
+    const { filesystem } = createFixture();
+    let committed!: CloudflareAgentFSTransaction;
+    filesystem.transactionSync(transaction => {
+      committed = transaction;
+      transaction.kv.set('inside', true);
+    });
+
+    expect(() => committed.writeFile('/escaped', 'no')).toThrow('transaction is already closed');
+    expect(() => committed.kv.set('escaped', true)).toThrow('transaction is already closed');
+    expect(() => committed.tools.record({
+      name: 'escaped',
+      outcome: { kind: 'success', result: null },
+      startedAt: 1,
+      completedAt: 1,
+    })).toThrow('transaction is already closed');
+    expect(() => committed.overlay.createWhiteout('/escaped', 1))
+      .toThrow('transaction is already closed');
+
+    let rolledBack!: CloudflareAgentFSTransaction;
+    expect(() => filesystem.transactionSync(transaction => {
+      rolledBack = transaction;
+      throw new Error('rollback');
+    })).toThrow('rollback');
+    expect(() => rolledBack.readFile('/anything')).toThrow('transaction is already closed');
+  });
+
   it('zero-extends truncate growth through both mutation APIs', async () => {
     const { filesystem } = createFixture();
     await filesystem.writeFile('/file.bin', Buffer.from('abc'));
@@ -121,6 +111,26 @@ describe('Cloudflare caller-owned transactions', () => {
     expect(content.subarray(0, 3).toString()).toBe('abc');
     expect(content.subarray(3, 20_000)).toEqual(Buffer.alloc(19_997));
     expect(content.subarray(20_000).toString()).toBe('tail');
+  });
+
+  it('rejects excessive zero-fill work atomically', async () => {
+    const database = new DatabaseSync(':memory:');
+    databases.push(database);
+    const filesystem = AgentFS.create(cloudflareStorage(database), {
+      maxZeroFillBytes: 8,
+    });
+    await filesystem.writeFile('/bounded.bin', Buffer.from('abc'));
+    const handle = await filesystem.open('/bounded.bin');
+
+    await expect(handle.pwrite(12, Buffer.from('tail'))).rejects.toThrow(
+      'zero-fill gap of 9 bytes exceeds the 8 byte limit',
+    );
+    expect(await filesystem.readFile('/bounded.bin')).toEqual(Buffer.from('abc'));
+
+    await expect(handle.truncate(12)).rejects.toThrow(
+      'zero-fill gap of 9 bytes exceeds the 8 byte limit',
+    );
+    expect(await filesystem.readFile('/bounded.bin')).toEqual(Buffer.from('abc'));
   });
 
   it('rejects an unknown persisted schema instead of relabeling it', () => {

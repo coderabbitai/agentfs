@@ -1,48 +1,8 @@
-import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
+import { DatabaseSync } from 'node:sqlite';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import {
-  AgentFS,
-  type CloudflareStorage,
-} from '../src/integrations/cloudflare/index.js';
-
-function cursor<T>(rows: T[]) {
-  return {
-    toArray: () => rows,
-    one: () => {
-      if (rows.length !== 1) throw new Error(`expected one row, received ${rows.length}`);
-      return rows[0];
-    },
-  } as ReturnType<CloudflareStorage['sql']['exec']>;
-}
-
-function cloudflareStorage(database: DatabaseSync): CloudflareStorage {
-  return {
-    sql: {
-      exec<T>(query: string, ...bindings: unknown[]) {
-        if (bindings.length === 0 && query.includes(';')) {
-          database.exec(query);
-          return cursor<T>([]);
-        }
-        return cursor(database.prepare(query).all(...bindings as SQLInputValue[]) as T[]);
-      },
-      get databaseSize() {
-        return 0;
-      },
-    },
-    transactionSync<T>(callback: () => T): T {
-      database.exec('BEGIN IMMEDIATE');
-      try {
-        const result = callback();
-        database.exec('COMMIT');
-        return result;
-      } catch (error) {
-        database.exec('ROLLBACK');
-        throw error;
-      }
-    },
-  };
-}
+import { AgentFS } from '../src/integrations/cloudflare/index.js';
+import { cloudflareStorage } from './cloudflare-test-storage.js';
 
 describe('Cloudflare single-cell AgentFS surfaces', () => {
   const databases: DatabaseSync[] = [];
@@ -180,6 +140,53 @@ describe('Cloudflare single-cell AgentFS surfaces', () => {
       .toThrow('tool_calls is insert-only');
     expect(() => database.exec('DELETE FROM tool_calls WHERE id = 1'))
       .toThrow('tool_calls is insert-only');
+  });
+
+  it('sanitizes tool-call payloads before persistence and supports controlled retention', () => {
+    const database = new DatabaseSync(':memory:');
+    databases.push(database);
+    const agent = AgentFS.create(cloudflareStorage(database), {
+      sanitizeToolCallValue: (_field, value) => {
+        if (typeof value !== 'object' || value === null) return value;
+        return { ...value, token: '[REDACTED]' };
+      },
+    });
+    const oldId = agent.tools.record({
+      name: 'fetch',
+      parameters: { token: 'input-secret', path: '/public' },
+      outcome: { kind: 'success', result: { token: 'output-secret', ok: true } },
+      startedAt: 10,
+      completedAt: 11,
+    });
+    const currentId = agent.tools.record({
+      name: 'fetch',
+      outcome: { kind: 'error', error: 'safe error' },
+      startedAt: 20,
+      completedAt: 21,
+    });
+
+    expect(agent.tools.get(oldId)).toMatchObject({
+      parameters: { token: '[REDACTED]', path: '/public' },
+      outcome: { kind: 'success', result: { token: '[REDACTED]', ok: true } },
+    });
+    expect(database.prepare('SELECT parameters, result FROM tool_calls WHERE id = ?').get(oldId))
+      .toEqual({
+        parameters: '{"token":"[REDACTED]","path":"/public"}',
+        result: '{"token":"[REDACTED]","ok":true}',
+      });
+    expect(agent.tools.purgeBefore(20)).toBe(1);
+    expect(agent.tools.get(oldId)).toBeUndefined();
+    expect(agent.tools.get(currentId)).toBeDefined();
+    expect(() => database.exec(`DELETE FROM tool_calls WHERE id = ${currentId}`))
+      .toThrow('tool_calls is insert-only');
+  });
+
+  it('identifies the key when persisted KV JSON is corrupt', () => {
+    const { agent, database } = createFixture();
+    database.exec("INSERT INTO kv_store(key, value) VALUES ('bad:key', '{')");
+
+    expect(() => agent.kv.get('bad:key')).toThrow('stored KV value for bad:key');
+    expect(() => agent.kv.list('bad:')).toThrow('stored KV value for bad:key');
   });
 
   it('normalizes overlay metadata and keeps direct-child whiteout queries exact', () => {

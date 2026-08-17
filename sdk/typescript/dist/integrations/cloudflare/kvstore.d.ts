@@ -5,8 +5,8 @@ export interface CloudflareKvEntry<T = unknown> {
 }
 export interface CloudflareKvTransaction {
     set(key: string, value: unknown): void;
-    get<T = unknown>(key: string): T | undefined;
-    list<T = unknown>(prefix: string): CloudflareKvEntry<T>[];
+    get(key: string): unknown | undefined;
+    list(prefix: string): CloudflareKvEntry[];
     delete(key: string): void;
 }
 /** AgentFS KV storage over the caller's Durable Objects SQLite database. */
@@ -14,11 +14,11 @@ export declare class CloudflareKvStore implements CloudflareKvTransaction {
     private readonly storage;
     constructor(storage: CloudflareStorage);
     private initialize;
-    transactionView(): CloudflareKvTransaction;
+    transactionView(assertOpen?: () => void): CloudflareKvTransaction;
     set(key: string, value: unknown): void;
     private setSync;
-    get<T = unknown>(key: string): T | undefined;
-    list<T = unknown>(prefix: string): CloudflareKvEntry<T>[];
+    get(key: string): unknown | undefined;
+    list(prefix: string): CloudflareKvEntry[];
     delete(key: string): void;
     private deleteSync;
 }

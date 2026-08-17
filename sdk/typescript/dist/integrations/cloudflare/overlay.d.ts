@@ -10,7 +10,7 @@ export declare class CloudflareOverlayMetadata implements CloudflareOverlayTrans
     private readonly storage;
     constructor(storage: CloudflareStorage);
     private initialize;
-    transactionView(): CloudflareOverlayTransaction;
+    transactionView(assertOpen?: () => void): CloudflareOverlayTransaction;
     createWhiteout(path: string, createdAt?: number): void;
     private createWhiteoutSync;
     removeWhiteout(path: string): void;

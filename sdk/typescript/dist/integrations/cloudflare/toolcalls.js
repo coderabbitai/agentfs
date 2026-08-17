@@ -1,16 +1,4 @@
-function serializeJson(label, value) {
-    let serialized;
-    try {
-        serialized = JSON.stringify(value);
-    }
-    catch {
-        throw new TypeError(`${label} must be JSON-serializable`);
-    }
-    if (serialized === undefined) {
-        throw new TypeError(`${label} must be JSON-serializable`);
-    }
-    return serialized;
-}
+import { parseStoredJson, serializeJson } from './json.js';
 function validateLimit(limit) {
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 10_000) {
         throw new RangeError('tool-call query limit must be an integer from 1 through 10000');
@@ -19,8 +7,10 @@ function validateLimit(limit) {
 /** Insert-only AgentFS tool-call storage over Durable Objects SQLite. */
 export class CloudflareToolCalls {
     storage;
-    constructor(storage) {
+    sanitize;
+    constructor(storage, options = {}) {
         this.storage = storage;
+        this.sanitize = options.sanitize ?? ((_field, value) => value);
         this.initialize();
     }
     initialize() {
@@ -42,16 +32,29 @@ export class CloudflareToolCalls {
         ON tool_calls(name);
       CREATE INDEX IF NOT EXISTS idx_tool_calls_started_at
         ON tool_calls(started_at);
+      CREATE TABLE IF NOT EXISTS agentfs_tool_call_maintenance (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        allow_delete INTEGER NOT NULL DEFAULT 0 CHECK (allow_delete IN (0, 1))
+      );
+      INSERT OR IGNORE INTO agentfs_tool_call_maintenance(singleton, allow_delete)
+        VALUES (1, 0);
       CREATE TRIGGER IF NOT EXISTS agentfs_tool_calls_no_update
         BEFORE UPDATE ON tool_calls
         BEGIN SELECT RAISE(ABORT, 'tool_calls is insert-only'); END;
-      CREATE TRIGGER IF NOT EXISTS agentfs_tool_calls_no_delete
+      DROP TRIGGER IF EXISTS agentfs_tool_calls_no_delete;
+      CREATE TRIGGER agentfs_tool_calls_no_delete
         BEFORE DELETE ON tool_calls
+        WHEN (SELECT allow_delete FROM agentfs_tool_call_maintenance WHERE singleton = 1) = 0
         BEGIN SELECT RAISE(ABORT, 'tool_calls is insert-only'); END;
     `);
     }
-    transactionView() {
-        return { record: call => this.recordSync(call) };
+    transactionView(assertOpen = () => undefined) {
+        return {
+            record: call => {
+                assertOpen();
+                return this.recordSync(call);
+            },
+        };
     }
     record(call) {
         return this.storage.transactionSync(() => this.recordSync(call));
@@ -70,9 +73,9 @@ export class CloudflareToolCalls {
         }
         const parameters = call.parameters === undefined
             ? null
-            : serializeJson('tool-call parameters', call.parameters);
+            : serializeJson('tool-call parameters', this.sanitize('parameters', call.parameters));
         const result = call.outcome.kind === 'success'
-            ? serializeJson('tool-call result', call.outcome.result)
+            ? serializeJson('tool-call result', this.sanitize('result', call.outcome.result))
             : null;
         const error = call.outcome.kind === 'error' ? call.outcome.error : null;
         const row = this.storage.sql.exec(`INSERT INTO tool_calls(
@@ -116,20 +119,57 @@ export class CloudflareToolCalls {
             averageDurationMs: row.average_duration_ms,
         }));
     }
-    fromRow(row) {
-        if ((row.result === null) === (row.error === null)) {
-            throw new Error(`tool call ${row.id} violates the AgentFS outcome invariant`);
+    /**
+     * Explicit retention/erasure path. Ordinary transaction views remain
+     * insert-only; this method opens one transaction and enables deletion only
+     * for its bounded maintenance statement.
+     */
+    purgeBefore(startedBefore) {
+        if (!Number.isSafeInteger(startedBefore) || startedBefore < 0) {
+            throw new RangeError('startedBefore must be a non-negative Unix timestamp in seconds');
         }
+        return this.storage.transactionSync(() => {
+            this.storage.sql.exec(`UPDATE agentfs_tool_call_maintenance
+         SET allow_delete = 1 WHERE singleton = 1`);
+            try {
+                this.storage.sql.exec('DELETE FROM tool_calls WHERE started_at < ?', startedBefore);
+                return this.storage.sql.exec('SELECT changes() AS count').one().count;
+            }
+            finally {
+                this.storage.sql.exec(`UPDATE agentfs_tool_call_maintenance
+           SET allow_delete = 0 WHERE singleton = 1`);
+            }
+        });
+    }
+    fromRow(row) {
+        const outcome = this.outcomeFromRow(row);
         return {
             id: row.id,
             name: row.name,
-            ...(row.parameters === null ? {} : { parameters: JSON.parse(row.parameters) }),
-            outcome: row.error === null
-                ? { kind: 'success', result: JSON.parse(row.result) }
-                : { kind: 'error', error: row.error },
+            ...(row.parameters === null
+                ? {}
+                : {
+                    parameters: parseStoredJson(`tool call ${row.id} parameters`, row.parameters),
+                }),
+            outcome,
             startedAt: row.started_at,
             completedAt: row.completed_at,
             durationMs: row.duration_ms,
+        };
+    }
+    outcomeFromRow(row) {
+        if (row.error !== null) {
+            if (row.result !== null) {
+                throw new Error(`tool call ${row.id} violates the AgentFS outcome invariant`);
+            }
+            return { kind: 'error', error: row.error };
+        }
+        if (row.result === null) {
+            throw new Error(`tool call ${row.id} violates the AgentFS outcome invariant`);
+        }
+        return {
+            kind: 'success',
+            result: parseStoredJson(`tool call ${row.id} result`, row.result),
         };
     }
 }

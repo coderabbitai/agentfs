@@ -9,7 +9,11 @@
 import { type Stats, type DirEntry, type FilesystemStats, type FileHandle, type FileSystem } from '../../filesystem/interface.js';
 import { CloudflareKvStore, type CloudflareKvTransaction } from './kvstore.js';
 import { CloudflareOverlayMetadata, type CloudflareOverlayTransaction } from './overlay.js';
-import { CloudflareToolCalls, type CloudflareToolCallsTransaction } from './toolcalls.js';
+import { CloudflareToolCalls, type CloudflareToolCallSanitizer, type CloudflareToolCallsTransaction } from './toolcalls.js';
+export interface CloudflareAgentFSOptions {
+    maxZeroFillBytes?: number;
+    sanitizeToolCallValue?: CloudflareToolCallSanitizer;
+}
 /**
  * Cloudflare Durable Objects SqlStorage cursor interface
  */
@@ -90,6 +94,7 @@ export declare class AgentFS implements FileSystem {
     private storage;
     private rootIno;
     private chunkSize;
+    private readonly maxZeroFillBytes;
     readonly kv: CloudflareKvStore;
     readonly tools: CloudflareToolCalls;
     readonly overlay: CloudflareOverlayMetadata;
@@ -99,7 +104,7 @@ export declare class AgentFS implements FileSystem {
      *
      * @param storage - The ctx.storage from a Durable Object
      */
-    static create(storage: CloudflareStorage): AgentFS;
+    static create(storage: CloudflareStorage, options?: CloudflareAgentFSOptions): AgentFS;
     getChunkSize(): number;
     /**
      * Runs AgentFS mutations in one caller-owned storage transaction.

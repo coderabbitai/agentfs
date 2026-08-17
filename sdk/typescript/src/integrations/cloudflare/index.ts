@@ -30,6 +30,7 @@
 export {
   AgentFS,
   type CloudflareAgentFSTransaction,
+  type CloudflareAgentFSOptions,
   type CloudflareStorage,
 } from "./agentfs.js";
 export {
@@ -46,6 +47,8 @@ export {
   type CloudflareToolCall,
   type CloudflareToolCallInput,
   type CloudflareToolCallOutcome,
+  type CloudflareToolCallSanitizer,
+  type CloudflareToolCallsOptions,
   type CloudflareToolCallsTransaction,
   type CloudflareToolCallStats,
 } from "./toolcalls.js";

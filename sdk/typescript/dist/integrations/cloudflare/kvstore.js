@@ -1,16 +1,4 @@
-function serializeJson(value) {
-    let serialized;
-    try {
-        serialized = JSON.stringify(value);
-    }
-    catch {
-        throw new TypeError('KV values must be JSON-serializable');
-    }
-    if (serialized === undefined) {
-        throw new TypeError('KV values must be JSON-serializable');
-    }
-    return serialized;
-}
+import { parseStoredJson, serializeJson } from './json.js';
 function escapeLike(value) {
     return value.replace(/[\\%_]/g, character => `\\${character}`);
 }
@@ -33,19 +21,31 @@ export class CloudflareKvStore {
         ON kv_store(created_at);
     `);
     }
-    transactionView() {
+    transactionView(assertOpen = () => undefined) {
         return {
-            set: (key, value) => this.setSync(key, value),
-            get: (key) => this.get(key),
-            list: (prefix) => this.list(prefix),
-            delete: key => this.deleteSync(key),
+            set: (key, value) => {
+                assertOpen();
+                this.setSync(key, value);
+            },
+            get: key => {
+                assertOpen();
+                return this.get(key);
+            },
+            list: prefix => {
+                assertOpen();
+                return this.list(prefix);
+            },
+            delete: key => {
+                assertOpen();
+                this.deleteSync(key);
+            },
         };
     }
     set(key, value) {
         this.storage.transactionSync(() => this.setSync(key, value));
     }
     setSync(key, value) {
-        const serialized = serializeJson(value);
+        const serialized = serializeJson('KV values', value);
         this.storage.sql.exec(`INSERT INTO kv_store (key, value, updated_at)
        VALUES (?, ?, unixepoch())
        ON CONFLICT(key) DO UPDATE SET
@@ -54,12 +54,17 @@ export class CloudflareKvStore {
     }
     get(key) {
         const rows = this.storage.sql.exec('SELECT value FROM kv_store WHERE key = ?', key).toArray();
-        return rows.length === 0 ? undefined : JSON.parse(rows[0].value);
+        return rows.length === 0
+            ? undefined
+            : parseStoredJson(`stored KV value for ${key}`, rows[0].value);
     }
     list(prefix) {
         return this.storage.sql.exec(`SELECT key, value FROM kv_store
        WHERE key LIKE ? ESCAPE '\\'
-       ORDER BY key`, `${escapeLike(prefix)}%`).toArray().map(row => ({ key: row.key, value: JSON.parse(row.value) }));
+       ORDER BY key`, `${escapeLike(prefix)}%`).toArray().map(row => ({
+            key: row.key,
+            value: parseStoredJson(`stored KV value for ${row.key}`, row.value),
+        }));
     }
     delete(key) {
         this.storage.transactionSync(() => this.deleteSync(key));
