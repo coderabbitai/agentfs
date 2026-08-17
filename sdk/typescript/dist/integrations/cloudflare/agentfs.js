@@ -196,6 +196,7 @@ export class AgentFS {
      */
     transactionSync(callback) {
         const transaction = {
+            readFile: path => this.readFileSync(path),
             writeFile: (path, content, options) => this.writeFileSync(path, content, options),
             unlink: path => this.unlinkSync(path),
             rm: (path, options) => this.rmSync(path, options),
@@ -433,6 +434,13 @@ export class AgentFS {
         const encoding = typeof options === 'string'
             ? options
             : options?.encoding;
+        const combined = this.readFileSync(path);
+        if (encoding) {
+            return combined.toString(encoding);
+        }
+        return combined;
+    }
+    readFileSync(path) {
         const { normalizedPath, ino } = this.resolvePathOrThrow(path, 'open');
         const mode = this.getInodeMode(ino);
         if (mode !== null && (mode & S_IFMT) === S_IFDIR) {
@@ -454,9 +462,6 @@ export class AgentFS {
         }
         const now = Math.floor(Date.now() / 1000);
         this.storage.sql.exec('UPDATE fs_inode SET atime = ? WHERE ino = ?', now, ino);
-        if (encoding) {
-            return combined.toString(encoding);
-        }
         return combined;
     }
     async readdir(path) {

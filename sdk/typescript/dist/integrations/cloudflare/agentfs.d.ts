@@ -42,6 +42,7 @@ export interface CloudflareStorage {
  * transaction. Methods on this object never open a nested transaction.
  */
 export interface CloudflareAgentFSTransaction {
+    readFile(path: string): Buffer;
     writeFile(path: string, content: string | Buffer, options?: BufferEncoding | {
         encoding?: BufferEncoding;
     }): void;
@@ -120,6 +121,7 @@ export declare class AgentFS implements FileSystem {
     readFile(path: string, options: {
         encoding: BufferEncoding;
     }): Promise<string>;
+    private readFileSync;
     readdir(path: string): Promise<string[]>;
     readdirPlus(path: string): Promise<DirEntry[]>;
     stat(path: string): Promise<Stats>;

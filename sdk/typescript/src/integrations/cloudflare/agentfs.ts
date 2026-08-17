@@ -59,6 +59,7 @@ export interface CloudflareStorage {
  * transaction. Methods on this object never open a nested transaction.
  */
 export interface CloudflareAgentFSTransaction {
+  readFile(path: string): Buffer;
   writeFile(
     path: string,
     content: string | Buffer,
@@ -346,6 +347,7 @@ export class AgentFS implements FileSystem {
    */
   transactionSync<T>(callback: (transaction: CloudflareAgentFSTransaction) => T): T {
     const transaction: CloudflareAgentFSTransaction = {
+      readFile: path => this.readFileSync(path),
       writeFile: (path, content, options) => this.writeFileSync(path, content, options),
       unlink: path => this.unlinkSync(path),
       rm: (path, options) => this.rmSync(path, options),
@@ -689,6 +691,16 @@ export class AgentFS implements FileSystem {
       ? options
       : options?.encoding;
 
+    const combined = this.readFileSync(path);
+
+    if (encoding) {
+      return combined.toString(encoding);
+    }
+    return combined;
+  }
+
+  private readFileSync(path: string): Buffer {
+
     const { normalizedPath, ino } = this.resolvePathOrThrow(path, 'open');
 
     const mode = this.getInodeMode(ino);
@@ -716,10 +728,6 @@ export class AgentFS implements FileSystem {
 
     const now = Math.floor(Date.now() / 1000);
     this.storage.sql.exec('UPDATE fs_inode SET atime = ? WHERE ino = ?', now, ino);
-
-    if (encoding) {
-      return combined.toString(encoding);
-    }
     return combined;
   }
 
