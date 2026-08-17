@@ -65,6 +65,7 @@ describe('Cloudflare caller-owned transactions', () => {
 
     filesystem.transactionSync(transaction => {
       transaction.writeFile('/knowledge/fact.md', 'fact');
+      expect(transaction.stat('/knowledge/fact.md')).toMatchObject({ size: 4 });
       expect(transaction.readFile('/knowledge/fact.md').toString('utf8')).toBe('fact');
       storage.sql.exec(
         'INSERT INTO app_metadata(path, revision) VALUES (?, ?)',

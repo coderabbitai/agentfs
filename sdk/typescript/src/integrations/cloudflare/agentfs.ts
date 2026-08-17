@@ -73,6 +73,7 @@ export interface CloudflareAgentFSTransaction {
   readonly tools: CloudflareToolCallsTransaction;
   readonly overlay: CloudflareOverlayTransaction;
   readFile(path: string): Buffer;
+  stat(path: string): Stats;
   writeFile(
     path: string,
     content: string | Buffer,
@@ -378,6 +379,7 @@ export class AgentFS implements FileSystem {
       tools: this.tools.transactionView(),
       overlay: this.overlay.transactionView(),
       readFile: path => this.readFileSync(path),
+      stat: path => this.statSync(path),
       writeFile: (path, content, options) => this.writeFileSync(path, content, options),
       unlink: path => this.unlinkSync(path),
       rm: (path, options) => this.rmSync(path, options),
@@ -841,6 +843,10 @@ export class AgentFS implements FileSystem {
   }
 
   async stat(path: string): Promise<Stats> {
+    return this.statSync(path);
+  }
+
+  private statSync(path: string): Stats {
     const { normalizedPath, ino } = this.resolvePathOrThrow(path, 'stat');
 
     const rows = this.storage.sql.exec<{
