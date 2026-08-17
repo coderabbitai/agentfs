@@ -23,6 +23,7 @@ import {
 } from '../../filesystem/interface.js';
 
 const DEFAULT_CHUNK_SIZE = 4096;
+const AGENTFS_SCHEMA_VERSION = '0.4';
 
 /**
  * Cloudflare Durable Objects SqlStorage cursor interface
@@ -374,6 +375,20 @@ export class AgentFS implements FileSystem {
       )
     `);
 
+    const schemaRows = this.storage.sql.exec<{ value: string }>(
+      "SELECT value FROM fs_config WHERE key = 'schema_version'"
+    ).toArray();
+    if (schemaRows.length === 0) {
+      this.storage.sql.exec(
+        "INSERT INTO fs_config (key, value) VALUES ('schema_version', ?)",
+        AGENTFS_SCHEMA_VERSION
+      );
+    } else if (schemaRows[0].value !== AGENTFS_SCHEMA_VERSION) {
+      throw new Error(
+        `unsupported AgentFS schema ${schemaRows[0].value}; expected ${AGENTFS_SCHEMA_VERSION}`
+      );
+    }
+
     this.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS fs_inode (
         ino INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -441,11 +456,6 @@ export class AgentFS implements FileSystem {
     } else {
       chunkSize = parseInt(configRows[0].value, 10) || DEFAULT_CHUNK_SIZE;
     }
-
-    // Set schema version (keep in sync with AGENTFS_SCHEMA_VERSION in sdk/rust/src/schema.rs)
-    this.storage.sql.exec(
-      "INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', '0.4')"
-    );
 
     const rootRows = this.storage.sql.exec<{ ino: number }>(
       'SELECT ino FROM fs_inode WHERE ino = ?',

@@ -122,6 +122,22 @@ describe('Cloudflare caller-owned transactions', () => {
     expect(content.subarray(20_000).toString()).toBe('tail');
   });
 
+  it('rejects an unknown persisted schema instead of relabeling it', () => {
+    const database = new DatabaseSync(':memory:');
+    databases.push(database);
+    database.exec(`
+      CREATE TABLE fs_config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+      INSERT INTO fs_config(key, value) VALUES ('schema_version', 'future');
+    `);
+
+    expect(() => AgentFS.create(cloudflareStorage(database))).toThrow(
+      'unsupported AgentFS schema future; expected 0.4'
+    );
+    expect(database.prepare(
+      "SELECT value FROM fs_config WHERE key = 'schema_version'"
+    ).get()).toEqual({ value: 'future' });
+  });
+
   it('supports rename and removal without nested transactions', async () => {
     const { filesystem } = createFixture();
 

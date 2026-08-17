@@ -8,6 +8,7 @@
  */
 import { S_IFMT, S_IFDIR, S_IFLNK, DEFAULT_FILE_MODE, DEFAULT_DIR_MODE, createStats, } from '../../filesystem/interface.js';
 const DEFAULT_CHUNK_SIZE = 4096;
+const AGENTFS_SCHEMA_VERSION = '0.4';
 function createFsError(opts) {
     const err = new Error(`${opts.code}: ${opts.message}, ${opts.syscall} '${opts.path}'`);
     err.code = opts.code;
@@ -217,6 +218,13 @@ export class AgentFS {
         value TEXT NOT NULL
       )
     `);
+        const schemaRows = this.storage.sql.exec("SELECT value FROM fs_config WHERE key = 'schema_version'").toArray();
+        if (schemaRows.length === 0) {
+            this.storage.sql.exec("INSERT INTO fs_config (key, value) VALUES ('schema_version', ?)", AGENTFS_SCHEMA_VERSION);
+        }
+        else if (schemaRows[0].value !== AGENTFS_SCHEMA_VERSION) {
+            throw new Error(`unsupported AgentFS schema ${schemaRows[0].value}; expected ${AGENTFS_SCHEMA_VERSION}`);
+        }
         this.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS fs_inode (
         ino INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -273,8 +281,6 @@ export class AgentFS {
         else {
             chunkSize = parseInt(configRows[0].value, 10) || DEFAULT_CHUNK_SIZE;
         }
-        // Set schema version (keep in sync with AGENTFS_SCHEMA_VERSION in sdk/rust/src/schema.rs)
-        this.storage.sql.exec("INSERT OR REPLACE INTO fs_config (key, value) VALUES ('schema_version', '0.4')");
         const rootRows = this.storage.sql.exec('SELECT ino FROM fs_inode WHERE ino = ?', this.rootIno).toArray();
         if (rootRows.length === 0) {
             const now = Math.floor(Date.now() / 1000);
