@@ -66,8 +66,15 @@ export async function runResearchAgent(question: string): Promise<string> {
       mcpServers: {
         'research-tools': toolServer,
       },
+      strictMcpConfig: true,
+      // Disable native host tools; untrusted paper content must stay within the research tools.
+      extraArgs: { tools: '' },
+      allowedTools: [
+        'mcp__research-tools__search-semanticscholar-vldb-sigmod',
+        'mcp__research-tools__fetch-pdf-text',
+        'mcp__research-tools__resolve-pdf-url',
+      ],
       maxTurns: 50,
-      permissionMode: 'bypassPermissions',
     },
   });
 
