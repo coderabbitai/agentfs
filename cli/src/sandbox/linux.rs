@@ -935,6 +935,44 @@ fn run_parent(
     std::process::exit(exit_code);
 }
 
+/// In the forked child, keep only the standard streams for the guest.
+fn close_guest_descriptors() -> std::io::Result<()> {
+    let first = (libc::STDERR_FILENO + 1) as libc::c_uint;
+    // SAFETY: This runs only after child setup, on the child's private fd table.
+    if unsafe { libc::syscall(libc::SYS_close_range, first, libc::c_uint::MAX, 0u32) } == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() != Some(libc::ENOSYS) {
+        return Err(err);
+    }
+
+    // Kernels before Linux 5.9 lack close_range. Finish enumeration before
+    // closing anything so the directory iterator can close its own fd.
+    let mut fds = Vec::new();
+    for entry in fs::read_dir("/proc/self/fd")? {
+        let entry = entry?;
+        let fd = entry
+            .file_name()
+            .to_string_lossy()
+            .parse::<libc::c_int>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        if fd > libc::STDERR_FILENO {
+            fds.push(fd);
+        }
+    }
+    for fd in fds {
+        if unsafe { libc::close(fd) } != 0 {
+            let err = std::io::Error::last_os_error();
+            // The directory iterator's fd is already closed.
+            if err.raw_os_error() != Some(libc::EBADF) {
+                return Err(err);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Execute the command, replacing the current process.
 fn exec_command(command: PathBuf, args: Vec<String>, session_id: &str) -> ! {
     setup_env_vars(session_id);
@@ -967,6 +1005,10 @@ fn exec_command(command: PathBuf, args: Vec<String>, session_id: &str) -> ! {
         .map(|s| s.as_ptr())
         .chain(std::iter::once(std::ptr::null()))
         .collect();
+
+    if let Err(err) = close_guest_descriptors() {
+        child_exit(&format!("Failed to close inherited descriptors: {err}"));
+    }
 
     unsafe {
         libc::execvp(cmd_cstr.as_ptr(), argv_ptrs.as_ptr());
