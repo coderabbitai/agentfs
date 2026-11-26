@@ -179,7 +179,12 @@ impl HostFS {
         // Open root with O_PATH
         let c_path = CString::new(root.as_os_str().as_bytes())
             .map_err(|_| Error::Internal("invalid path".to_string()))?;
-        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+        let fd = unsafe {
+            libc::open(
+                c_path.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -275,7 +280,12 @@ impl HostFS {
     /// Open a real fd from an O_PATH fd via /proc/self/fd/
     fn open_real_fd(o_path_fd: RawFd, flags: libc::c_int) -> Result<OwnedFd> {
         let proc_path = format!("/proc/self/fd/{}\0", o_path_fd);
-        let fd = unsafe { libc::open(proc_path.as_ptr() as *const libc::c_char, flags) };
+        let fd = unsafe {
+            libc::open(
+                proc_path.as_ptr() as *const libc::c_char,
+                flags | libc::O_CLOEXEC,
+            )
+        };
         if fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -357,8 +367,13 @@ impl FileSystem for HostFS {
         let c_name = CString::new(name).map_err(|_| FsError::InvalidPath)?;
 
         // Open child with O_PATH | O_NOFOLLOW
-        let child_fd =
-            unsafe { libc::openat(parent_fd, c_name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW) };
+        let child_fd = unsafe {
+            libc::openat(
+                parent_fd,
+                c_name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
 
         if child_fd < 0 {
             let err = std::io::Error::last_os_error();
@@ -567,8 +582,13 @@ impl FileSystem for HostFS {
         for (name, stat) in entries_raw {
             // Open O_PATH fd for this entry
             let c_name = CString::new(name.as_str()).map_err(|_| FsError::InvalidPath)?;
-            let child_fd =
-                unsafe { libc::openat(fd, c_name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW) };
+            let child_fd = unsafe {
+                libc::openat(
+                    fd,
+                    c_name.as_ptr(),
+                    libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
 
             if child_fd < 0 {
                 continue; // Skip entries we can't open
@@ -711,7 +731,7 @@ impl FileSystem for HostFS {
             libc::openat(
                 parent_fd,
                 c_name.as_ptr(),
-                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR,
+                libc::O_CREAT | libc::O_TRUNC | libc::O_RDWR | libc::O_CLOEXEC,
                 mode as libc::mode_t,
             )
         };
@@ -725,8 +745,13 @@ impl FileSystem for HostFS {
         let real_fd = unsafe { OwnedFd::from_raw_fd(file_fd) };
 
         // Also open O_PATH fd for the inode cache
-        let o_path_fd =
-            unsafe { libc::openat(parent_fd, c_name.as_ptr(), libc::O_PATH | libc::O_NOFOLLOW) };
+        let o_path_fd = unsafe {
+            libc::openat(
+                parent_fd,
+                c_name.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
         if o_path_fd < 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -961,6 +986,29 @@ mod tests {
     use super::*;
     use crate::DEFAULT_FILE_MODE;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn test_hostfs_descriptors_close_on_exec() -> Result<()> {
+        let dir = tempdir()?;
+        std::fs::write(dir.path().join("file"), b"test")?;
+        let fs = HostFS::new(dir.path())?;
+        let child = fs.lookup(ROOT_INO, "file").await?.unwrap();
+        let child_fd = fs.get_inode_fd(child.ino)?;
+        let io_fd = HostFS::open_real_fd(child_fd, libc::O_RDONLY)?;
+
+        for fd in [
+            fs.root_fd.as_raw_fd(),
+            fs.get_inode_fd(ROOT_INO)?,
+            child_fd,
+            io_fd.as_raw_fd(),
+        ] {
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+            assert!(flags >= 0, "F_GETFD failed for fd {fd}");
+            assert_ne!(flags & libc::FD_CLOEXEC, 0, "fd {fd} is inheritable");
+        }
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_hostfs_basic() -> Result<()> {

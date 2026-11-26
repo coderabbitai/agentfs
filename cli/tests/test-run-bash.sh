@@ -6,9 +6,13 @@ echo -n "TEST interactive bash session... "
 # Run bash session in overlay: write a file and read it back
 # The current directory becomes copy-on-write with the overlay sandbox
 output=$(cargo run -- run /bin/bash -c '
+if [ -e /proc/self/fd/9 ]; then
+    echo "unexpected inherited descriptor 9" >&2
+    exit 1
+fi
 echo "hello from agent" > hello.txt
 cat hello.txt
-' 2>&1)
+' 9</dev/null 2>&1)
 
 # Verify we got the expected output
 echo "$output" | grep -q "hello from agent" || {
