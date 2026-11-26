@@ -304,7 +304,8 @@ class ToolCalls:
 
         Args:
             name: Name of the tool
-            limit: Maximum number of results (optional)
+            limit: Maximum number of results as a signed 64-bit integer.
+                None or a negative value means no limit.
 
         Returns:
             List of ToolCall objects, ordered by most recent first
@@ -314,27 +315,23 @@ class ToolCalls:
             >>> for call in calls:
             >>>     print(f"ID: {call.id}, Status: {call.status}")
         """
-        limit_clause = f"LIMIT {limit}" if limit is not None else ""
-
-        cursor = await self._db.execute(
-            f"""
+        return await self._query_history(
+            """
             SELECT * FROM tool_calls
             WHERE name = ?
             ORDER BY started_at DESC
-            {limit_clause}
             """,
-            (name,),
+            name,
+            limit,
         )
-        rows = await cursor.fetchall()
-
-        return [self._row_to_tool_call(row) for row in rows]
 
     async def get_recent(self, since: int, limit: Optional[int] = None) -> List[ToolCall]:
         """Query recent tool calls
 
         Args:
             since: Unix timestamp to filter calls after
-            limit: Maximum number of results (optional)
+            limit: Maximum number of results as a signed 64-bit integer.
+                None or a negative value means no limit.
 
         Returns:
             List of ToolCall objects, ordered by most recent first
@@ -344,19 +341,28 @@ class ToolCalls:
             >>> since = int(time.time()) - 3600
             >>> calls = await tools.get_recent(since)
         """
-        limit_clause = f"LIMIT {limit}" if limit is not None else ""
-
-        cursor = await self._db.execute(
-            f"""
+        return await self._query_history(
+            """
             SELECT * FROM tool_calls
             WHERE started_at > ?
             ORDER BY started_at DESC
-            {limit_clause}
             """,
-            (since,),
+            since,
+            limit,
         )
-        rows = await cursor.fetchall()
 
+    async def _query_history(
+        self, query: str, filter_value: str | int, limit: int | None
+    ) -> List[ToolCall]:
+        if limit is None:
+            cursor = await self._db.execute(query, (filter_value,))
+        else:
+            if not isinstance(limit, int) or isinstance(limit, bool):
+                raise TypeError("limit must be an integer or None")
+            if not -(2**63) <= limit < 2**63:
+                raise ValueError("limit must fit in a signed 64-bit integer")
+            cursor = await self._db.execute(query + " LIMIT ?", (filter_value, limit))
+        rows = await cursor.fetchall()
         return [self._row_to_tool_call(row) for row in rows]
 
     async def get_stats(self) -> List[ToolCallStats]:

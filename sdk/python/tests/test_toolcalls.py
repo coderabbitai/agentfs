@@ -204,7 +204,30 @@ class TestToolCallsQueryOperations:
             await tools.start("tool_3")
 
             results = await tools.get_recent(now - 10, limit=2)
-            assert len(results) <= 2
+            assert len(results) == 2
+            await db.close()
+
+    @pytest.mark.parametrize("query", ["get_by_name", "get_recent"])
+    async def test_history_limit_validation(self, query):
+        db = await connect(":memory:")
+        try:
+            tools = await ToolCalls.from_database(db)
+            await tools.record("tool_a", started_at=1, completed_at=2)
+            latest_id = await tools.record("tool_a", started_at=2, completed_at=3)
+            history = getattr(tools, query)
+            match = "tool_a" if query == "get_by_name" else 0
+
+            assert [call.id for call in await history(match, limit=1)] == [latest_id]
+            assert await history(match, limit=0) == []
+            for limit in (None, -1, -(2**63), 2**63 - 1):
+                assert len(await history(match, limit=limit)) == 2
+            for limit in ("1", 1.0, True):
+                with pytest.raises(TypeError, match="limit must be an integer"):
+                    await history(match, limit=limit)
+            for limit in (-(2**63) - 1, 2**63):
+                with pytest.raises(ValueError, match="signed 64-bit integer"):
+                    await history(match, limit=limit)
+        finally:
             await db.close()
 
     async def test_empty_results_for_nonexistent_name(self):
